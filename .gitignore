@@ -1,0 +1,25 @@
+# Node / Nuxt
+node_modules/
+.nuxt/
+.output/
+.data/
+dist/
+*.log
+
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+
+# Backups / local data
+backups/
+*.dump
+*.sql.gz

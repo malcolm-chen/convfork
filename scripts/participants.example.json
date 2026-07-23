@@ -1,0 +1,18 @@
+{
+  "teams": [
+    {
+      "name": "Team Alpha",
+      "members": [
+        { "email": "alpha1@study.local", "display_name": "Alpha One", "role": "designer" },
+        { "email": "alpha2@study.local", "display_name": "Alpha Two", "role": "researcher" }
+      ]
+    },
+    {
+      "name": "Team Beta",
+      "members": [
+        { "email": "beta1@study.local", "display_name": "Beta One", "role": "designer" },
+        { "email": "beta2@study.local", "display_name": "Beta Two", "role": "researcher" }
+      ]
+    }
+  ]
+}

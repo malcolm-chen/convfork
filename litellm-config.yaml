@@ -1,0 +1,36 @@
+# LiteLLM proxy config — OpenAI-compatible gateway in front of any backbone.
+# Run: uv run litellm --config litellm-config.yaml   (listens on :4000 by default)
+#
+# The Nitro /api/chat proxy calls this with model = $LLM_MODEL. Switching the
+# backbone is a one-line change here + LLM_MODEL in .env — no app code changes.
+
+model_list:
+  # Azure OpenAI (active backbone) — set LLM_MODEL=gpt-5.5 in .env to use this.
+  # `model: azure/<deployment>` — the part after azure/ MUST equal your Azure
+  # deployment name (Azure AI Foundry → resource → Deployments). Endpoint/key/
+  # version come from .env (AZURE_API_BASE is the resource root, no path).
+  - model_name: gpt-5.5
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+  # Anthropic (alternate backbone) — set LLM_MODEL=claude-opus-4-8 to use this.
+  - model_name: claude-opus-4-8
+    litellm_params:
+      model: anthropic/claude-opus-4-8
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # Vanilla OpenAI (alternate)
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+litellm_settings:
+  drop_params: true                       # tolerate provider-specific param differences
+
+# Optional: a master key the Nitro proxy presents as LITELLM_API_KEY. Safe to
+# omit for localhost-only dev (then leave LITELLM_API_KEY blank). Set it once the
+# proxy is reachable beyond localhost.
+# general_settings:
+#   master_key: os.environ/LITELLM_API_KEY

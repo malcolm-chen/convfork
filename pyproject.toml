@@ -1,0 +1,15 @@
+[project]
+name = "convfork-tooling"
+version = "0.1.0"
+description = "uv-managed Python tooling for ConvFork: LiteLLM proxy, account seeding, backups."
+requires-python = ">=3.11"
+dependencies = [
+    "litellm[proxy]>=1.51.0",
+    "supabase>=2.9.0",
+    "python-dotenv>=1.0.1",
+    "boto3>=1.35.0",
+]
+
+# Run the proxy:   uv run litellm --config litellm-config.yaml
+# Seed accounts:   uv run python scripts/seed_users.py
+# Back up the DB:  uv run python scripts/backup.py
