@@ -15,7 +15,7 @@ const { streamingText, isStreaming, error, send } = useLLMStream()
 const nodes = conv.nodes
 const reactionsByNode = conv.reactionsByNode
 const selectedId = ref<string | null>(null)
-// Set when the user explicitly forks: the right panel then renders everything
+// Set when the user explicitly forks: the chat panel then renders everything
 // up to this node as prior history, with a divider before the new branch.
 const forkPointId = ref<string | null>(null)
 // True after "New chat" until the first message (or selecting an existing chat).
@@ -23,27 +23,31 @@ const drafting = ref(false)
 const currentUserId = computed(() => user.value?.id ?? '')
 const messages = computed(() => (drafting.value ? [] : conv.lineageOf(selectedId.value)))
 
-// ── Resizable right (chat) panel ──
-const RIGHT_W_KEY = 'convfork:rightPanelWidth'
-const RIGHT_W_DEFAULT = 560
-const RIGHT_W_MIN = 360
-const rightWidth = ref(RIGHT_W_DEFAULT)
+// ── Resizable chat/tree split (both flex, equal by default) ──
+// splitRatio is the tree panel's share of the chat+tree space; the chat panel
+// always gets the rest, so they're equal width (0.5/0.5) until dragged.
+const SPLIT_KEY = 'convfork:panelSplitRatio'
+const SPLIT_DEFAULT = 0.5
+const SPLIT_MIN_PX = 320 // neither panel should get narrower than this
+const splitRatio = ref(SPLIT_DEFAULT)
 const resizing = ref(false)
 
-function clampRightWidth(w: number) {
-  const max = Math.max(RIGHT_W_MIN, Math.floor(window.innerWidth * 0.62))
-  return Math.min(max, Math.max(RIGHT_W_MIN, Math.round(w)))
+function clampSplitRatio(r: number) {
+  const available = Math.max(1, window.innerWidth - 236)
+  const min = Math.min(0.5, SPLIT_MIN_PX / available)
+  return Math.min(1 - min, Math.max(min, r))
 }
 
 function onSplitterDown(e: PointerEvent) {
   e.preventDefault()
   resizing.value = true
   const startX = e.clientX
-  const startW = rightWidth.value
+  const startRatio = splitRatio.value
+  const available = Math.max(1, window.innerWidth - 236)
 
   const onMove = (ev: PointerEvent) => {
-    // Dragging the left edge of the chat panel leftward widens it.
-    rightWidth.value = clampRightWidth(startW + (startX - ev.clientX))
+    // The splitter sits on the tree panel's left edge — dragging it leftward widens the tree.
+    splitRatio.value = clampSplitRatio(startRatio + (startX - ev.clientX) / available)
   }
   const onUp = () => {
     resizing.value = false
@@ -51,9 +55,9 @@ function onSplitterDown(e: PointerEvent) {
     window.removeEventListener('pointerup', onUp)
     window.removeEventListener('pointercancel', onUp)
     try {
-      localStorage.setItem(RIGHT_W_KEY, String(rightWidth.value))
+      localStorage.setItem(SPLIT_KEY, String(splitRatio.value))
     } catch { /* ignore */ }
-    // Let Vue Flow / canvas remeasure the center pane.
+    // Let Vue Flow / canvas remeasure its pane.
     window.dispatchEvent(new Event('resize'))
   }
   window.addEventListener('pointermove', onMove)
@@ -153,8 +157,8 @@ const branchTitle = computed(() => {
 
 onMounted(async () => {
   try {
-    const saved = Number(localStorage.getItem(RIGHT_W_KEY))
-    if (Number.isFinite(saved) && saved > 0) rightWidth.value = clampRightWidth(saved)
+    const saved = Number(localStorage.getItem(SPLIT_KEY))
+    if (Number.isFinite(saved) && saved > 0) splitRatio.value = clampSplitRatio(saved)
   } catch { /* ignore */ }
 
   await conv.load()
@@ -183,9 +187,13 @@ function startNewChat() {
   drafting.value = true
 }
 
-async function onSubmit(text: string) {
+async function onSubmit(payload: { text: string; model: string }) {
   const parentNodeId = drafting.value ? null : selectedId.value
-  const r = await send({ conversationId, parentNodeId, userText: text })
+  // True only for the first message right after clicking Fork (selectedId is
+  // still sitting on the fork point) — tells the server to start a brand new
+  // branch here instead of leaving it to (unreliable) sibling-count inference.
+  const isFork = !!forkPointId.value && parentNodeId === forkPointId.value
+  const r = await send({ conversationId, parentNodeId, userText: payload.text, model: payload.model, isFork })
   // Pull the new pair immediately — selecting before the realtime INSERT
   // arrives would otherwise blank the thread panel for a beat.
   await conv.fetchLineage(r.assistantNodeId)
@@ -240,17 +248,52 @@ async function onToggleVisibility(segmentNodes: TreeNode[]) {
   if (to === 'private') rt.broadcastRetract(ids)
 }
 
-// Share the whole selected branch: flip all of the caller's own private nodes on
-// the root→selected path to shared, in one transaction (RPC).
-async function shareBranch() {
-  if (!selectiveSharing.value || !selectedId.value) return
-  const ids = conv
-    .lineageOf(selectedId.value)
+// Own nodes on the root→selected path — what the "Share/Unshare branch"
+// button in the header actually controls (teammates' own nodes are untouched).
+const ownBranchNodes = computed(() => messages.value.filter((n) => n.author_id === currentUserId.value))
+const branchIsShared = computed(
+  () => ownBranchNodes.value.length > 0 && ownBranchNodes.value.every((n) => n.visibility === 'shared'),
+)
+const showShareModal = ref(false)
+
+// Clicking the header button either opens the turn picker (nothing shared
+// yet, or only part of the branch is) or, if the whole branch is already
+// shared, unshares it in one step — mirrors the button's own label.
+function onShareButtonClick() {
+  if (!selectiveSharing.value || !selectedId.value || !ownBranchNodes.value.length) return
+  if (branchIsShared.value) unshareBranch()
+  else showShareModal.value = true
+}
+
+// Share the caller's own nodes from the root up through (and including)
+// `uptoId` — or, when null, the whole branch ("Share all"). Gives the user
+// control over the unit of sharing instead of all-or-nothing.
+async function shareBranchUpTo(uptoId: string | null) {
+  const lineage = messages.value
+  const cutoff = uptoId ? lineage.findIndex((n) => n.id === uptoId) : lineage.length - 1
+  if (cutoff < 0) return
+  const ids = lineage
+    .slice(0, cutoff + 1)
     .filter((n) => n.author_id === currentUserId.value && n.visibility === 'private')
     .map((n) => n.id)
+  showShareModal.value = false
   if (!ids.length) return
-  logger.log('toggle_visibility', { node_ids: ids, to: 'shared', scope: 'branch' }, { conversationId, nodeId: selectedId.value })
+  logger.log(
+    'toggle_visibility',
+    { node_ids: ids, to: 'shared', scope: uptoId ? 'branch_partial' : 'branch' },
+    { conversationId, nodeId: selectedId.value! },
+  )
   await supabase.rpc('share_branch', { node_ids: ids })
+}
+
+async function unshareBranch() {
+  const ids = ownBranchNodes.value.filter((n) => n.visibility === 'shared').map((n) => n.id)
+  if (!ids.length) return
+  logger.log('toggle_visibility', { node_ids: ids, to: 'private', scope: 'branch' }, { conversationId, nodeId: selectedId.value! })
+  await supabase.from('nodes').update({ visibility: 'private' }).in('id', ids)
+  // Teammates never receive the shared→private UPDATE (RLS filters realtime
+  // events against the new row), so tell them to drop the retracted nodes.
+  rt.broadcastRetract(ids)
 }
 
 // Clear the whole tree — every member's branches — after an explicit confirm.
@@ -332,7 +375,7 @@ async function signOut() {
   <div
     class="workspace"
     :class="{ resizing }"
-    :style="{ gridTemplateColumns: `236px minmax(0, 1fr) ${rightWidth}px` }"
+    :style="{ gridTemplateColumns: `236px minmax(0, ${1 - splitRatio}fr) minmax(0, ${splitRatio}fr)` }"
   >
     <SideNav
       :display-name="profile?.display_name ?? ''"
@@ -348,8 +391,70 @@ async function signOut() {
       @signout="signOut"
     />
 
-    <!-- ── Center: the conversation tree ── -->
+    <!-- ── Center: chat history + selected thread ── -->
+    <aside class="branchpanel">
+      <ChatSidebar
+        :nodes="nodes"
+        :selected-id="selectedId"
+        :drafting="drafting"
+        :show-visibility="selectiveSharing"
+        @select="select"
+        @new="startNewChat"
+      />
+      <div class="threadcol">
+        <header class="panelhdr">
+          <div class="hdrtext">
+            <p class="crumb">{{ drafting ? 'New chat' : forkPointId ? 'Forked chat' : 'Chat' }}</p>
+            <h2>{{ drafting ? 'Start a new conversation' : branchTitle }}</h2>
+          </div>
+          <button
+            v-if="selectiveSharing && selectedId && !drafting && ownBranchNodes.length"
+            class="sharebtn"
+            :class="{ active: branchIsShared }"
+            @click="onShareButtonClick"
+          >
+            {{ branchIsShared ? 'Unshare branch' : 'Share branch' }}
+          </button>
+        </header>
+        <ShareBranchModal
+          v-if="showShareModal"
+          :messages="messages"
+          :current-user-id="currentUserId"
+          :member-names="memberNames"
+          @share="shareBranchUpTo"
+          @close="showShareModal = false"
+        />
+        <ThreadPanel
+          :messages="messages"
+          :fork-point-id="forkPointId"
+          :member-names="memberNames"
+          :current-user-id="currentUserId"
+          :streaming-text="streamingText"
+          :is-streaming="isStreaming"
+          :error="error"
+          :drafting="drafting"
+          :show-visibility="selectiveSharing"
+        />
+        <Composer
+          :conversation-id="conversationId"
+          :parent-node-id="drafting ? null : selectedId"
+          :forked="!!forkPointId && selectedId === forkPointId && !drafting"
+          :disabled="isStreaming"
+          @submit="onSubmit"
+        />
+      </div>
+    </aside>
+
+    <!-- ── Right: the conversation tree ── -->
     <main class="treepanel">
+      <div
+        class="splitter"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize conversation tree panel"
+        title="Drag to resize"
+        @pointerdown="onSplitterDown"
+      />
       <header class="panelhdr">
         <div>
           <p class="crumb">Project</p>
@@ -380,58 +485,6 @@ async function signOut() {
         />
       </div>
     </main>
-
-    <!-- ── Right: chat history + selected thread ── -->
-    <aside class="branchpanel">
-      <div
-        class="splitter"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize chat panel"
-        title="Drag to resize"
-        @pointerdown="onSplitterDown"
-      />
-      <ChatSidebar
-        :nodes="nodes"
-        :selected-id="selectedId"
-        :drafting="drafting"
-        @select="select"
-        @new="startNewChat"
-      />
-      <div class="threadcol">
-        <header class="panelhdr">
-          <div class="hdrtext">
-            <p class="crumb">{{ drafting ? 'New chat' : forkPointId ? 'Forked chat' : 'Chat' }}</p>
-            <h2>{{ drafting ? 'Start a new conversation' : branchTitle }}</h2>
-          </div>
-          <button
-            v-if="selectiveSharing && selectedId && !drafting"
-            class="sharebtn"
-            @click="shareBranch"
-          >
-            Share branch
-          </button>
-        </header>
-        <ThreadPanel
-          :messages="messages"
-          :fork-point-id="forkPointId"
-          :member-names="memberNames"
-          :current-user-id="currentUserId"
-          :streaming-text="streamingText"
-          :is-streaming="isStreaming"
-          :error="error"
-          :drafting="drafting"
-          :show-visibility="selectiveSharing"
-        />
-        <Composer
-          :conversation-id="conversationId"
-          :parent-node-id="drafting ? null : selectedId"
-          :forked="!!forkPointId && selectedId === forkPointId && !drafting"
-          :disabled="isStreaming"
-          @submit="onSubmit"
-        />
-      </div>
-    </aside>
   </div>
 </template>
 
@@ -499,21 +552,21 @@ async function signOut() {
 .clearbtn:disabled { opacity: 0.5; cursor: default; }
 
 .treepanel {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100vh;
   min-width: 0;
+  border-left: 2px solid var(--panel-edge);
 }
 .treewrap { flex: 1; min-height: 0; }
 
 .branchpanel {
-  position: relative;
   display: flex;
   flex-direction: row;
   height: 100vh;
   min-width: 0;
   background: var(--card);
-  border-left: 2px solid var(--panel-edge);
 }
 .splitter {
   position: absolute;
@@ -562,4 +615,6 @@ async function signOut() {
   transition: all 0.15s ease;
 }
 .sharebtn:hover { background: var(--accent); color: #fff; }
+.sharebtn.active { background: var(--accent); color: #fff; }
+.sharebtn.active:hover { background: var(--accent-soft); color: var(--accent); }
 </style>

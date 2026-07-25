@@ -1,14 +1,28 @@
 <script setup lang="ts">
+import { DEFAULT_MODEL_ID, MODEL_OPTIONS } from '../../shared/models'
+
 const props = defineProps<{
   conversationId: string
   parentNodeId: string | null
   forked?: boolean
   disabled?: boolean
 }>()
-const emit = defineEmits<{ (e: 'submit', text: string): void }>()
+const emit = defineEmits<{ (e: 'submit', payload: { text: string; model: string }): void }>()
 
 const text = ref('')
 const logger = useActionLogger()
+
+const runtimeConfig = useRuntimeConfig()
+const availableModels = computed(() =>
+  MODEL_OPTIONS.filter((m) =>
+    m.provider === 'openai' ? runtimeConfig.public.hasOpenaiKey : runtimeConfig.public.hasAnthropicKey,
+  ),
+)
+const model = ref(
+  availableModels.value.some((m) => m.id === DEFAULT_MODEL_ID)
+    ? DEFAULT_MODEL_ID
+    : (availableModels.value[0]?.id ?? DEFAULT_MODEL_ID),
+)
 
 function onInput() {
   logger.logTyping(text.value.length, { conversationId: props.conversationId })
@@ -17,7 +31,7 @@ function onInput() {
 function submit() {
   const t = text.value.trim()
   if (!t || props.disabled) return
-  emit('submit', t)
+  emit('submit', { text: t, model: model.value })
   text.value = ''
 }
 </script>
@@ -38,9 +52,14 @@ function submit() {
           <template v-else-if="parentNodeId">↳ continuing this chat</template>
           <template v-else>starting a new chat</template>
         </p>
-        <button :disabled="disabled || !text.trim()" @click="submit">
-          {{ disabled ? 'Generating…' : 'Send' }}
-        </button>
+        <div class="footright">
+          <select v-model="model" class="modelselect" :disabled="disabled" title="Model backbone">
+            <option v-for="m in availableModels" :key="m.id" :value="m.id">{{ m.label }}</option>
+          </select>
+          <button :disabled="disabled || !text.trim()" @click="submit">
+            {{ disabled ? 'Generating…' : 'Send' }}
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -73,6 +92,18 @@ textarea {
 }
 .foot { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
 .ctx { margin: 0; font-size: 11px; color: var(--muted); }
+.footright { display: flex; align-items: center; gap: 8px; }
+.modelselect {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.modelselect:disabled { opacity: 0.55; cursor: default; }
 button {
   padding: 7px 18px;
   border: 0;

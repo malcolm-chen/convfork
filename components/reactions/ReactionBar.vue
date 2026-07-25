@@ -150,7 +150,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
       :title="pinnedByMe ? 'Click to unpin' : 'Pin this branch'"
       @click.stop="toggle(PIN)"
     >
-      <span class="e">{{ PIN }}</span><span v-if="pinCount" class="c">{{ pinCount }}</span>
+      <AppIcon name="thumbtack" :size="11" class="e" /><span v-if="pinCount" class="c">{{ pinCount }}</span>
       <span v-if="pinCount" class="tip" role="tooltip">{{ pinUsers.names.join(', ') }}</span>
     </button>
   </div>
@@ -241,9 +241,8 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
   transition: background 0.12s ease, color 0.12s ease;
 }
 .add:hover, .add.active, .pin:hover { background: var(--accent-soft); color: var(--accent); }
-.pin .e { font-size: 13px; line-height: 1; }
 .pin .c { font-size: 10.5px; font-weight: 600; color: var(--accent); }
-.pin.on { background: var(--accent-soft); }
+.pin.on { background: var(--accent-soft); color: var(--accent); }
 
 .pickerpop {
   position: absolute;

@@ -23,6 +23,13 @@ const emit = defineEmits<{
   (e: 'toggle-visibility', nodes: TreeNode[]): void
 }>()
 
+// Recomputed synchronously (no debounce) straight off props.nodes, so a card's
+// turn list / fork options never lag behind an in-flight chat. Cards look
+// themselves up here by their stable segment id rather than trusting the
+// (debounced, and separately vue-flow-internal) node.data below.
+const segments = computed(() => segmentize(props.nodes))
+const segmentsById = computed(() => new Map(segments.value.map((s) => [s.id, s])))
+
 const vfNodes = ref<any[]>([])
 const vfEdges = ref<any[]>([])
 let timer: ReturnType<typeof setTimeout> | null = null
@@ -36,20 +43,21 @@ function segHeight(_s: Segment<TreeNode>) {
   return 120
 }
 
+// Layout (dagre positions) is expensive, so it stays debounced — but that
+// only affects where a card sits, never what it shows (see segments above).
 function relayout() {
-  // One graph node per conversation trajectory, not per turn.
-  const segments = segmentize(props.nodes)
+  const segs = segments.value
   const g = new dagre.graphlib.Graph()
   g.setGraph({ rankdir: 'TB', nodesep: 30, ranksep: 56 })
   g.setDefaultEdgeLabel(() => ({}))
-  for (const s of segments) g.setNode(s.id, { width: W, height: segHeight(s) })
-  for (const s of segments) if (s.parentId) g.setEdge(s.parentId, s.id)
+  for (const s of segs) g.setNode(s.id, { width: W, height: segHeight(s) })
+  for (const s of segs) if (s.parentId) g.setEdge(s.parentId, s.id)
   dagre.layout(g)
-  vfNodes.value = segments.map((s) => {
+  vfNodes.value = segs.map((s) => {
     const p = g.node(s.id)
     return { id: s.id, type: 'msg', position: { x: p.x - W / 2, y: p.y - segHeight(s) / 2 }, data: s }
   })
-  vfEdges.value = segments
+  vfEdges.value = segs
     .filter((s) => s.parentId)
     .map((s) => ({
       id: `${s.parentId}->${s.id}`,
@@ -76,7 +84,7 @@ watch(
     <VueFlow :nodes="vfNodes" :edges="vfEdges" :fit-view-on-init="true" :min-zoom="0.2" :max-zoom="1.5">
       <template #node-msg="{ data }">
         <NodeCard
-          :segment="data"
+          :segment="segmentsById.get(data.id) ?? data"
           :reactions-by-node="reactionsByNode"
           :selected-id="selectedId"
           :current-user-id="currentUserId"

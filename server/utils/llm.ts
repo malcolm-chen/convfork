@@ -1,5 +1,8 @@
 // Provider-agnostic LLM call via the LiteLLM proxy (OpenAI-compatible).
-// Switching the backbone is config (.env + litellm-config.yaml), not code.
+// The backbone is picked per-request (see shared/models.ts + the composer's
+// dropdown), not fixed in config.
+
+import { DEFAULT_MODEL_ID } from '../../shared/models'
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant'
@@ -7,7 +10,7 @@ export interface LLMMessage {
 }
 
 // Streams text deltas from LiteLLM's /chat/completions SSE response.
-export async function* callLLM(messages: LLMMessage[]): AsyncGenerator<string> {
+export async function* callLLM(messages: LLMMessage[], model: string): AsyncGenerator<string> {
   const c = useRuntimeConfig()
   let res: Response
   try {
@@ -17,7 +20,7 @@ export async function* callLLM(messages: LLMMessage[]): AsyncGenerator<string> {
         'content-type': 'application/json',
         authorization: `Bearer ${c.litellmApiKey}`,
       },
-      body: JSON.stringify({ model: c.llmModel, messages, stream: true }),
+      body: JSON.stringify({ model, messages, stream: true }),
     })
   } catch (err: any) {
     throw createError({
@@ -61,7 +64,7 @@ export async function* callLLM(messages: LLMMessage[]): AsyncGenerator<string> {
 // node-card auto-summary, where we want the whole text at once, not tokens.
 export async function completeLLM(
   messages: LLMMessage[],
-  opts: { maxTokens?: number } = {},
+  opts: { maxTokens?: number; model?: string } = {},
 ): Promise<string> {
   const c = useRuntimeConfig()
   let res: Response
@@ -73,7 +76,7 @@ export async function completeLLM(
         authorization: `Bearer ${c.litellmApiKey}`,
       },
       body: JSON.stringify({
-        model: c.llmModel,
+        model: opts.model ?? DEFAULT_MODEL_ID,
         messages,
         stream: false,
         max_tokens: opts.maxTokens ?? 32,

@@ -8,6 +8,8 @@ const props = defineProps<{
   selectedId: string | null
   /** True when the user cleared selection to start a fresh root chat */
   drafting: boolean
+  /** True under the selective-sharing study condition — shows each chat's visibility tag */
+  showVisibility?: boolean
 }>()
 const emit = defineEmits<{
   (e: 'select', tipId: string): void
@@ -53,6 +55,12 @@ function titleOf(seg: Segment<TreeNode>) {
   return clean.length > 48 ? clean.slice(0, 47) + '…' : clean || 'Untitled chat'
 }
 
+// A chat reads as "public" once every node in it has been shared — a private
+// node anywhere in the segment means it's still only visible to its author(s).
+function isPublic(seg: Segment<TreeNode>) {
+  return seg.nodes.every((n) => n.visibility === 'shared')
+}
+
 watch(
   chats,
   (list) => {
@@ -91,7 +99,17 @@ function onelineTime(iso: string) {
         @click="emit('select', c.tip.id)"
       >
         <span class="ctitle">{{ titleOf(c) }}</span>
-        <span class="ctime">{{ onelineTime(c.tip.created_at) }}</span>
+        <div class="cmeta">
+          <span class="ctime">{{ onelineTime(c.tip.created_at) }}</span>
+          <span
+            v-if="showVisibility"
+            class="vistag"
+            :class="isPublic(c) ? 'public' : 'private'"
+            :title="isPublic(c) ? 'Visible to your whole team' : 'Private to you'"
+          >
+            {{ isPublic(c) ? 'Public' : 'Private' }}
+          </span>
+        </div>
       </li>
       <li v-if="!chats.length && !drafting" class="empty">No chats yet</li>
     </ul>
@@ -171,7 +189,26 @@ function onelineTime(iso: string) {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.cmeta { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .ctime { font-size: 10.5px; color: var(--muted); }
+.vistag {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  line-height: 1.5;
+}
+.vistag.private {
+  background: #f2e9dd;
+  color: #8a6d3b;
+}
+.vistag.public {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
 .empty {
   padding: 16px 8px;
   text-align: center;

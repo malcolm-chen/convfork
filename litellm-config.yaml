@@ -1,30 +1,53 @@
 # LiteLLM proxy config — OpenAI-compatible gateway in front of any backbone.
 # Run: uv run litellm --config litellm-config.yaml   (listens on :4000 by default)
 #
-# The Nitro /api/chat proxy calls this with model = $LLM_MODEL. Switching the
-# backbone is a one-line change here + LLM_MODEL in .env — no app code changes.
+# The user picks the model per message from the composer's dropdown (see
+# shared/models.ts) — the Nitro /api/chat route forwards that choice as
+# `model` on each request. Each `model_name` below MUST match an `id` in
+# shared/models.ts, or the dropdown offers a model this proxy can't serve.
 
 model_list:
-  # Azure OpenAI (active backbone) — set LLM_MODEL=gpt-5.5 in .env to use this.
-  # `model: azure/<deployment>` — the part after azure/ MUST equal your Azure
-  # deployment name (Azure AI Foundry → resource → Deployments). Endpoint/key/
-  # version come from .env (AZURE_API_BASE is the resource root, no path).
+  # OpenAI backbones — offered whenever OPENAI_API_KEY is set.
+  - model_name: gpt-5.3
+    litellm_params:
+      model: openai/gpt-5.3
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: gpt-5.4
+    litellm_params:
+      model: openai/gpt-5.4
+      api_key: os.environ/OPENAI_API_KEY
+
   - model_name: gpt-5.5
     litellm_params:
-      model: openai/gpt-4o
+      model: openai/gpt-5.5
       api_key: os.environ/OPENAI_API_KEY
 
-  # Anthropic (alternate backbone) — set LLM_MODEL=claude-opus-4-8 to use this.
-  - model_name: claude-opus-4-8
+  - model_name: gpt-5.6-sol
     litellm_params:
-      model: anthropic/claude-opus-4-8
+      model: openai/gpt-5.6-sol
+      api_key: os.environ/OPENAI_API_KEY
+
+  # Anthropic backbones — offered whenever ANTHROPIC_API_KEY is set.
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  # Vanilla OpenAI (alternate)
-  - model_name: gpt-4o
+  - model_name: claude-sonnet-5
     litellm_params:
-      model: openai/gpt-4o
-      api_key: os.environ/OPENAI_API_KEY
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-opus-4-6
+    litellm_params:
+      model: anthropic/claude-opus-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-opus-4-7
+    litellm_params:
+      model: anthropic/claude-opus-4-7
+      api_key: os.environ/ANTHROPIC_API_KEY
 
 litellm_settings:
   drop_params: true                       # tolerate provider-specific param differences

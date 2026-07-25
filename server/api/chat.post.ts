@@ -5,12 +5,16 @@
 //    can't drop the answer (§8.3)
 //  - cross-member forks recorded in team_interaction_logs (§5.3)
 
+import { DEFAULT_MODEL_ID, MODEL_OPTIONS } from '../../shared/models'
+
 interface ChatBody {
   conversationId: string
   parentNodeId: string | null
   userText: string
   userNodeId?: string
   assistantNodeId?: string
+  model?: string
+  isFork?: boolean
 }
 
 export default defineEventHandler(async (event) => {
@@ -20,6 +24,7 @@ export default defineEventHandler(async (event) => {
   if (!body?.conversationId || !body?.userText?.trim()) {
     throw createError({ statusCode: 400, statusMessage: 'conversationId and userText required' })
   }
+  const model = body.model && MODEL_OPTIONS.some((m) => m.id === body.model) ? body.model : DEFAULT_MODEL_ID
 
   const admin = useSupabaseAdmin()
 
@@ -65,13 +70,16 @@ export default defineEventHandler(async (event) => {
     }
     parentAuthor = parent.author_id
     isForkFromOther = !ownParent
-    // a new child marks a fork point if it forks another author's branch or
-    // creates a divergence (parent already had children)
+    // A new child marks a fork point if: the client explicitly forked here
+    // (so it always gets its own chat, even as the parent's first and only
+    // child so far — sibling count alone can't tell "fork" from "continue"),
+    // it forks another author's branch, or it creates a divergence (parent
+    // already had children).
     const { count } = await admin
       .from('nodes')
       .select('id', { count: 'exact', head: true })
       .eq('parent_id', parent.id)
-    isForkPoint = isForkFromOther || (count ?? 0) > 0
+    isForkPoint = body.isFork === true || isForkFromOther || (count ?? 0) > 0
   }
 
   // 1) persist the user node BEFORE streaming (idempotent upsert by id)
@@ -117,7 +125,7 @@ export default defineEventHandler(async (event) => {
       }
 
       try {
-        for await (const token of callLLM(messages)) {
+        for await (const token of callLLM(messages, model)) {
           full += token
           safeEnqueue({ t: token })
         }

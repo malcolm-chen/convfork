@@ -9,7 +9,13 @@ export function useLLMStream() {
   const error = ref<string | null>(null)
   const logger = useActionLogger()
 
-  async function send(opts: { conversationId: string; parentNodeId: string | null; userText: string }) {
+  async function send(opts: {
+    conversationId: string
+    parentNodeId: string | null
+    userText: string
+    model: string
+    isFork?: boolean
+  }) {
     isStreaming.value = true
     streamingText.value = ''
     error.value = null

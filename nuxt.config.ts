@@ -52,12 +52,16 @@ export default defineNuxtConfig({
     supabaseJwksUrl: process.env.SUPABASE_JWKS_URL,
     litellmBaseUrl: process.env.LITELLM_BASE_URL,
     litellmApiKey: process.env.LITELLM_API_KEY,
-    llmModel: process.env.LLM_MODEL || 'claude-opus-4-8',
     awsRegion: process.env.AWS_REGION,
     awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID,
     awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
     s3Bucket: process.env.S3_BUCKET,
-    public: {},
+    public: {
+      // Booleans only (never the keys themselves) — lets the composer's model
+      // dropdown show only backbones this deployment can actually serve.
+      hasOpenaiKey: !!process.env.OPENAI_API_KEY,
+      hasAnthropicKey: !!process.env.ANTHROPIC_API_KEY,
+    },
   },
 
   vite: {

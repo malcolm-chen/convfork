@@ -36,10 +36,6 @@ const visTitle = computed(() =>
   allShared.value ? 'shared' : anyShared.value ? 'partly shared' : 'private',
 )
 
-function canFork(n: TreeNode) {
-  return n.visibility === 'shared' || n.author_id === props.currentUserId
-}
-
 // Reactions anyone left anywhere on the trajectory; new ones attach to the
 // HEAD node — its id is stable for the segment's lifetime.
 const segReactions = computed(() =>
@@ -101,7 +97,12 @@ const fallback = computed(() => oneline(starter.value.content))
         @unreact="(p) => emit('unreact', p)"
       />
       <span class="spacer" />
-      <ForkButton v-if="canFork(tip)" @fork="emit('fork', tip.id)" />
+      <ForkButton
+        :segment="segment"
+        :current-user-id="currentUserId"
+        :member-names="memberNames"
+        @fork="(id) => emit('fork', id)"
+      />
     </div>
 
     <Handle type="source" :position="Position.Bottom" />

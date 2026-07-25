@@ -9,7 +9,7 @@ for the design and the implementation plan for the build rationale.
 
 - **Frontend/app:** Nuxt 3 (Vue 3) + Vue Flow + Nitro server routes (Node/npm).
 - **Data + realtime + auth:** managed **Supabase Cloud** (Postgres, Realtime, Auth, RLS).
-- **LLM backbone:** **LiteLLM** proxy (OpenAI-compatible) — provider-agnostic, `.env`-configurable (default `claude-opus-4-8`).
+- **LLM backbone:** **LiteLLM** proxy (OpenAI-compatible) — provider-agnostic; the user picks the model per message from a dropdown in the composer (default `gpt-5.4`), scoped to whichever provider keys are set (see `shared/models.ts`).
 - **Behavior logs + optional HTML/screenshots:** **AWS S3** (the small cross-member `team_interaction_logs` stays in Postgres).
 - **Python tooling:** `uv` (LiteLLM proxy, account seeding, backups).
 
