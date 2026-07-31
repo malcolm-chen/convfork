@@ -3,11 +3,9 @@ export default defineNuxtConfig({
   compatibilityDate: '2025-01-01',
   devtools: { enabled: true },
 
-  // The app-manifest virtual module (client-side route-rules/prerendering
-  // hints) fails to resolve in this dev setup ("#app-manifest" pre-transform
-  // error) — this app doesn't use routeRules/prerendering, so it's dead
-  // weight; disabling it stops the noisy (but otherwise harmless) log spam.
-  experimental: { appManifest: false },
+  // Python uv venv at repo root — Nuxt's dev watcher recurses into new dirs and will
+  // attach ~20k+ watchers here unless excluded (EMFILE on macOS).
+  ignore: ['**/.venv', '**/.venv/**', '**/__pycache__/**'],
 
   modules: ['@nuxtjs/supabase'],
 
@@ -26,7 +24,7 @@ export default defineNuxtConfig({
   },
 
   // Register components by bare filename (no directory prefix) — the app refers to
-  // them flat, e.g. <ReasoningTree>, <Composer>, <ReactionBar>, <TreeNode>.
+  // them flat, e.g. <ReasoningTree>, <Composer>, <ReactionBar>, <ForkButton>.
   // Without this, Nuxt names nested components <TreeReasoningTree>/<ThreadComposer>
   // etc., which silently fail to resolve and render as empty comments.
   components: [{ path: '~/components', pathPrefix: false }],
@@ -34,6 +32,7 @@ export default defineNuxtConfig({
   css: [
     '@vue-flow/core/dist/style.css',
     '@vue-flow/core/dist/theme-default.css',
+    '@vue-flow/controls/dist/style.css',
   ],
 
   // @nuxtjs/supabase injects useSupabaseClient() / serverSupabaseUser() and
@@ -73,6 +72,10 @@ export default defineNuxtConfig({
     // 'cookie' (dep of @supabase/ssr) is CJS-only; without prebundling, Vite dev
     // serves it raw and its named exports fail ESM analysis, breaking hydration.
     optimizeDeps: { include: ['cookie'] },
+    server: {
+      // .venv lives in repo root for Python tooling; Vite only ignores node_modules/.git by default.
+      watch: { ignored: ['**/.venv/**', '**/__pycache__/**'] },
+    },
   },
 
   nitro: {
