@@ -97,13 +97,20 @@ export async function* callLLM(messages: LLMMessage[], model: string, thinking?:
   }
 }
 
-// One-shot (non-streaming) completion — used for short utility calls like the
-// node-card auto-summary, where we want the whole text at once, not tokens.
-export async function completeLLM(
+// Every backbone this deployment actually has a provider key for (mirrors the
+// composer dropdown's own filtering in shared/models.ts + nuxt.config.ts).
+function configuredModelIds(c: ReturnType<typeof useRuntimeConfig>): string[] {
+  return MODEL_OPTIONS.filter((m) =>
+    m.provider === 'openai' ? c.public.hasOpenaiKey : c.public.hasAnthropicKey,
+  ).map((m) => m.id)
+}
+
+async function completeOnce(
   messages: LLMMessage[],
-  opts: { maxTokens?: number; model?: string } = {},
+  model: string,
+  maxTokens: number,
+  c: ReturnType<typeof useRuntimeConfig>,
 ): Promise<string> {
-  const c = useRuntimeConfig()
   let res: Response
   try {
     res = await fetch(`${c.litellmBaseUrl}/chat/completions`, {
@@ -112,13 +119,7 @@ export async function completeLLM(
         'content-type': 'application/json',
         authorization: `Bearer ${c.litellmApiKey}`,
       },
-      body: JSON.stringify({
-        model: opts.model ?? DEFAULT_MODEL_ID,
-        messages,
-        stream: false,
-        max_tokens: opts.maxTokens ?? 32,
-        temperature: 0.2,
-      }),
+      body: JSON.stringify({ model, messages, stream: false, max_tokens: maxTokens, temperature: 0.2 }),
     })
   } catch (err: any) {
     throw createError({
@@ -128,8 +129,39 @@ export async function completeLLM(
   }
   if (!res.ok) {
     const detail = await res.text().catch(() => '')
-    throw createError({ statusCode: 502, statusMessage: `LLM error ${res.status}: ${detail.slice(0, 300)}` })
+    throw createError({ statusCode: 502, statusMessage: `LLM error ${res.status} (${model}): ${detail.slice(0, 300)}` })
   }
   const json = await res.json()
   return (json.choices?.[0]?.message?.content ?? '').trim()
+}
+
+// One-shot (non-streaming) completion — used for short utility calls like the
+// node-card auto-summary, where we want the whole text at once, not tokens.
+// Unlike callLLM (a user's live chat reply, where switching backbones under
+// them would be surprising), this doesn't care which model answers — so if
+// the preferred/default one fails (bad key, provider outage, rate limit),
+// it falls through to whatever other backbone this deployment has a key for,
+// instead of surfacing an error for a background call the user never asked
+// to babysit.
+export async function completeLLM(
+  messages: LLMMessage[],
+  opts: { maxTokens?: number; model?: string } = {},
+): Promise<string> {
+  const c = useRuntimeConfig()
+  const available = configuredModelIds(c)
+  const preferred = opts.model && available.includes(opts.model) ? opts.model : undefined
+  const candidates = [preferred, DEFAULT_MODEL_ID, ...available].filter(
+    (m, i, arr): m is string => !!m && available.includes(m) && arr.indexOf(m) === i,
+  )
+  if (!candidates.length) candidates.push(opts.model ?? DEFAULT_MODEL_ID) // no key configured at all — fail with a real error below
+
+  let lastErr: unknown
+  for (const model of candidates) {
+    try {
+      return await completeOnce(messages, model, opts.maxTokens ?? 32, c)
+    } catch (err) {
+      lastErr = err
+    }
+  }
+  throw lastErr
 }
