@@ -190,7 +190,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
   max-width: 180px;
   padding: 5px 8px;
   border-radius: 7px;
-  background: #1d2029;
+  background: var(--ink);
   color: #fff;
   font-size: 11px;
   font-weight: 500;
@@ -198,7 +198,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
   white-space: normal;
   text-align: center;
   pointer-events: none;
-  box-shadow: 0 6px 18px rgba(29, 32, 41, 0.28);
+  box-shadow: 0 6px 18px rgba(20, 20, 30,0.28);
 }
 .pill:hover > .tip,
 .pin:hover > .tip { display: block; }
@@ -221,7 +221,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 10px;
-  box-shadow: 0 10px 26px rgba(29, 32, 41, 0.16);
+  box-shadow: 0 10px 26px rgba(20, 20, 30,0.16);
 }
 .ovf:hover .ovfpop { display: flex; }
 
@@ -254,7 +254,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
 .pickerpop :deep(.v3-emoji-picker) {
   width: 228px;
   height: 236px;
-  box-shadow: 0 10px 28px rgba(29, 32, 41, 0.2);
+  box-shadow: 0 10px 28px rgba(20, 20, 30,0.2);
   border-radius: 10px;
   font-size: 12px;
 }

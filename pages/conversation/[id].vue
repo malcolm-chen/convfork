@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import type { TreeNode } from '~/composables/useConversation'
-import { segmentize } from '~/composables/useSegments'
+import type { AttachmentRef } from '~/composables/useFileUpload'
+import { segmentize, sharedOrder, turnNumberOf } from '~/composables/useSegments'
+
+// Without this, navigating between two conversation pages (e.g. forking,
+// which lands you on `/conversation/<new-id>`) reuses this component instance
+// instead of remounting — Vue Router's default behavior for two routes that
+// match the same dynamic route record. `conversationId` below is captured
+// once at setup and everything derived from it (useConversation, useRealtime,
+// onMounted) would otherwise stay bound to whichever conversation was open
+// first. Keying by the full path forces a genuine remount per conversation.
+definePageMeta({ key: (route) => route.fullPath })
 
 const route = useRoute()
 const conversationId = route.params.id as string
@@ -10,16 +20,31 @@ const logger = useActionLogger()
 
 const conv = useConversation(conversationId)
 const rt = useRealtime(conversationId, conv)
-const { streamingText, isStreaming, error, send } = useLLMStream()
+const { streamingText, streamingReasoning, isStreaming, error, send } = useLLMStream()
+// The model backbone the in-flight reply is using — known synchronously at
+// submit time, well before any node carrying it is persisted.
+const streamingModel = ref<string | null>(null)
 
 const nodes = conv.nodes
 const reactionsByNode = conv.reactionsByNode
+const attachmentsByNode = conv.attachmentsByNode
 const selectedId = ref<string | null>(null)
 // Set when the user explicitly forks: the chat panel then renders everything
 // up to this node as prior history, with a divider before the new branch.
 const forkPointId = ref<string | null>(null)
 // True after "New chat" until the first message (or selecting an existing chat).
 const drafting = ref(false)
+
+// Persistent "draft forks": a fork the user started (picked a turn to fork
+// from) but hasn't sent a message in yet. There are no DB nodes for it until
+// the first message, so it's kept in localStorage per conversation — it
+// survives switching to another chat/project and page reloads, and only goes
+// away when the user sends its first message (it becomes a real branch) or
+// explicitly deletes it.
+interface DraftFork { key: string; forkFromNodeId: string; createdAt: string }
+const draftForks = ref<DraftFork[]>([])
+const activeDraftKey = ref<string | null>(null)
+const DRAFTS_KEY = `convfork:draftForks:${conversationId}`
 const currentUserId = computed(() => user.value?.id ?? '')
 const messages = computed(() => (drafting.value ? [] : conv.lineageOf(selectedId.value)))
 
@@ -93,7 +118,10 @@ const { data: team } = await useAsyncData('conv:team', async () => {
   return data
 })
 
-const selectiveSharing = computed(() => team.value?.sharing_condition !== 'default')
+const selectiveSharing = computed(() => team.value?.sharing_condition === 'selective_sharing')
+// Solo condition: no team panel, no canvas, no sharing — just the middle
+// conversation window (chat history + thread + composer).
+const individualLlm = computed(() => team.value?.sharing_condition === 'individual_llm')
 
 interface Member { id: string; display_name: string; role: string | null }
 const { data: members } = await useAsyncData('conv:members', async () => {
@@ -109,10 +137,12 @@ const { data: members } = await useAsyncData('conv:members', async () => {
 const { data: convos, refresh: refreshConvos } = await useAsyncData('conv:list', async () => {
   if (!profile.value?.team_id) return []
   // Embed each conversation's latest visible node (RLS-scoped) so projects
-  // sort by most recent activity, falling back to creation time.
+  // sort by most recent activity, falling back to creation time. The embed
+  // names the FK (nodes!nodes_conversation_id_fkey) explicitly to be
+  // unambiguous about which conversations<->nodes relationship to follow.
   const { data } = await supabase
     .from('conversations')
-    .select('id, title, created_at, nodes(created_at)')
+    .select('id, title, created_at, nodes!nodes_conversation_id_fkey(created_at)')
     .order('created_at', { referencedTable: 'nodes', ascending: false })
     .limit(1, { referencedTable: 'nodes' })
   return (data ?? [])
@@ -132,9 +162,26 @@ const memberNames = computed(() =>
 )
 
 // ── Tree meta for the header ──
-const branchCount = computed(() => {
-  const hasChild = new Set(nodes.value.map((n) => n.parent_id).filter(Boolean))
-  return nodes.value.filter((n) => !hasChild.has(n.id)).length
+function pad(n: number) {
+  return String(n).padStart(2, '0')
+}
+
+const lastUpdateLabel = computed(() => {
+  const latest = nodes.value.reduce((max, n) => (n.created_at > max ? n.created_at : max), convo.value?.created_at ?? '')
+  if (!latest) return '—'
+  const d = new Date(latest)
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+})
+
+const contributorAvatars = computed(() => {
+  const seen = new Set<string>()
+  const list: { id: string; name: string }[] = []
+  for (const n of nodes.value) {
+    if (seen.has(n.author_id)) continue
+    seen.add(n.author_id)
+    list.push({ id: n.author_id, name: memberNames.value[n.author_id] ?? '?' })
+  }
+  return list
 })
 
 function snippet(text: string, len = 44) {
@@ -155,14 +202,49 @@ const branchTitle = computed(() => {
   return snippet(anchor.content) || 'Untitled branch'
 })
 
+// The node the current branch was forked from: while actively forking, that's
+// the node under the composer (forkPointId); for an already-created fork chat,
+// it's the parent of the branch's fork-point node — the last is_fork_point on
+// the path to the selected turn.
+const forkOriginNodeId = computed<string | null>(() => {
+  if (forkPointId.value) return forkPointId.value
+  const path = messages.value
+  for (let i = path.length - 1; i >= 0; i--) {
+    if (path[i]!.is_fork_point) return path[i]!.parent_id
+  }
+  return null
+})
+
+// "Forked from C1-2" — the origin segment's shared-order badge plus the 1-based
+// position of the exact turn that was forked within it. Null (label hidden) if
+// the origin segment was never shared, since the C-numbering only covers shared
+// segments.
+const forkOriginLabel = computed(() => {
+  const originId = forkOriginNodeId.value
+  if (!originId) return null
+  const segs = segmentize(nodes.value)
+  const origin = segs.find((s) => s.nodes.some((n) => n.id === originId))
+  if (!origin) return null
+  const idx = sharedOrder(segs).get(origin.id)
+  if (idx == null) return null
+  return `C${idx}-${turnNumberOf(origin, originId)}`
+})
+
 onMounted(async () => {
   try {
     const saved = Number(localStorage.getItem(SPLIT_KEY))
     if (Number.isFinite(saved) && saved > 0) splitRatio.value = clampSplitRatio(saved)
   } catch { /* ignore */ }
 
+  // Belt-and-suspenders alongside the definePageMeta key above: force a fresh
+  // fetch rather than trusting Nuxt's cross-navigation useAsyncData cache for
+  // this key, so a newly created project shows up immediately in the list.
+  await refreshConvos()
+
   await conv.load()
   rt.start()
+  loadDraftForks()
+  pruneDraftForks()
   // ChatGPT-style: open the most recent chat, or start drafting if none exist.
   const tip = mostRecentChatTip(nodes.value)
   if (tip) selectedId.value = tip
@@ -176,6 +258,7 @@ onBeforeUnmount(() => {
 function select(id: string) {
   logger.log('select_branch', { node_id: id, from_node_id: selectedId.value }, { conversationId, nodeId: id })
   drafting.value = false
+  activeDraftKey.value = null // leaving a draft fork just deselects it; it stays in the list
   if (id !== forkPointId.value) forkPointId.value = null // navigating away ends fork mode
   selectedId.value = id
 }
@@ -184,29 +267,138 @@ function startNewChat() {
   logger.log('new_chat', {}, { conversationId })
   selectedId.value = null
   forkPointId.value = null
+  activeDraftKey.value = null
   drafting.value = true
 }
 
-async function onSubmit(payload: { text: string; model: string }) {
+async function onSubmit(payload: { text: string; model: string; thinking?: string; attachments?: AttachmentRef[] }) {
   const parentNodeId = drafting.value ? null : selectedId.value
   // True only for the first message right after clicking Fork (selectedId is
   // still sitting on the fork point) — tells the server to start a brand new
   // branch here instead of leaving it to (unreliable) sibling-count inference.
   const isFork = !!forkPointId.value && parentNodeId === forkPointId.value
-  const r = await send({ conversationId, parentNodeId, userText: payload.text, model: payload.model, isFork })
+  const materializedDraft = activeDraftKey.value
+  streamingModel.value = payload.model
+  const r = await send({
+    conversationId,
+    parentNodeId,
+    userText: payload.text,
+    model: payload.model,
+    thinking: payload.thinking,
+    attachments: payload.attachments,
+    isFork,
+    // Render the user's own turn the instant we know its id, rather than
+    // waiting on the full SSE stream + fetchLineage below — otherwise the
+    // message the user just sent doesn't appear until the agent starts
+    // replying, which reads as if it never sent.
+    onUserNodeId: (userNodeId) => {
+      conv.upsert({
+        id: userNodeId,
+        conversation_id: conversationId,
+        parent_id: parentNodeId,
+        author_id: currentUserId.value,
+        role: 'user',
+        content: payload.text,
+        reasoning: null,
+        visibility: 'private',
+        is_fork_point: isFork,
+        model: null,
+        created_at: new Date().toISOString(),
+      })
+      for (const a of payload.attachments ?? []) {
+        conv.addAttachment({
+          id: `optimistic:${a.key}`,
+          node_id: userNodeId,
+          filename: a.filename,
+          content_type: a.contentType,
+          size_bytes: a.size,
+          kind: a.kind,
+          created_at: new Date().toISOString(),
+        })
+      }
+      drafting.value = false
+      selectedId.value = userNodeId
+    },
+  })
   // Pull the new pair immediately — selecting before the realtime INSERT
-  // arrives would otherwise blank the thread panel for a beat.
+  // arrives would otherwise blank the thread panel for a beat. This also
+  // overwrites the optimistic user node above with the server-confirmed one.
   await conv.fetchLineage(r.assistantNodeId)
+  // The draft fork just became a real branch — drop its placeholder.
+  if (materializedDraft) removeDraftFork(materializedDraft)
   drafting.value = false
   selectedId.value = r.assistantNodeId
   refreshConvos() // bump this project to the top of the activity-ordered list
 }
 
-function onFork(id: string) {
-  logger.log('fork', { from_node_id: id }, { conversationId, nodeId: id })
+// ── Draft forks (persisted; see the declaration near the top) ──
+function loadDraftForks() {
+  try {
+    const raw = localStorage.getItem(DRAFTS_KEY)
+    draftForks.value = raw ? (JSON.parse(raw) as DraftFork[]) : []
+  } catch { draftForks.value = [] }
+}
+function persistDraftForks() {
+  try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(draftForks.value)) } catch { /* ignore */ }
+}
+// Drop drafts whose origin turn no longer exists (e.g. the tree was cleared).
+function pruneDraftForks() {
+  const before = draftForks.value.length
+  draftForks.value = draftForks.value.filter((d) => nodes.value.some((n) => n.id === d.forkFromNodeId))
+  if (draftForks.value.length !== before) persistDraftForks()
+}
+function activateDraftFork(key: string, forkFromNodeId: string) {
   drafting.value = false
-  forkPointId.value = id // right panel shows history up to here + fork divider
-  selectedId.value = id // composer now targets this node as parent
+  activeDraftKey.value = key
+  forkPointId.value = forkFromNodeId // thread shows history up to here + fork divider
+  selectedId.value = forkFromNodeId // composer targets this node as parent
+}
+function selectDraftFork(key: string) {
+  const d = draftForks.value.find((x) => x.key === key)
+  if (!d) return
+  logger.log('select_branch', { node_id: d.forkFromNodeId, from_node_id: selectedId.value, draft_fork: true }, { conversationId, nodeId: d.forkFromNodeId })
+  activateDraftFork(key, d.forkFromNodeId)
+}
+function removeDraftFork(key: string) {
+  draftForks.value = draftForks.value.filter((d) => d.key !== key)
+  persistDraftForks()
+  if (activeDraftKey.value === key) activeDraftKey.value = null
+}
+// User explicitly deletes a draft fork from the chat list.
+function deleteDraftFork(key: string) {
+  logger.log('delete_draft_fork', {}, { conversationId })
+  const wasActive = activeDraftKey.value === key
+  removeDraftFork(key)
+  if (wasActive) {
+    forkPointId.value = null
+    const tip = mostRecentChatTip(nodes.value)
+    if (tip) { selectedId.value = tip; drafting.value = false }
+    else { selectedId.value = null; drafting.value = true }
+  }
+}
+
+const pendingForkId = ref<string | null>(null)
+function onFork(id: string) {
+  pendingForkId.value = id
+}
+function cancelFork() {
+  pendingForkId.value = null
+}
+// Forking branches THIS conversation's tree — a new "chat" entry in Chat
+// History, not a new project. No DB node is written yet: we record a persistent
+// draft fork (localStorage) pointing at the chosen turn and activate it. The
+// fork-point node itself is created the normal way when the user sends the
+// first message (see onSubmit's isFork flag), at which point the draft is
+// dropped in favor of the real branch.
+function confirmFork() {
+  const id = pendingForkId.value
+  pendingForkId.value = null
+  if (!id) return
+  logger.log('fork', { from_node_id: id }, { conversationId, nodeId: id })
+  const key = crypto.randomUUID()
+  draftForks.value = [{ key, forkFromNodeId: id, createdAt: new Date().toISOString() }, ...draftForks.value]
+  persistDraftForks()
+  activateDraftFork(key, id)
 }
 
 async function onReact(payload: { nodeId: string; type: string }) {
@@ -242,7 +434,11 @@ async function onToggleVisibility(segmentNodes: TreeNode[]) {
   const to = own.some((n) => n.visibility === 'private') ? 'shared' : 'private'
   const ids = own.map((n) => n.id)
   logger.log('toggle_visibility', { node_ids: ids, to, scope: 'segment' }, { conversationId, nodeId: segmentNodes[0]!.id })
-  await supabase.from('nodes').update({ visibility: to }).in('id', ids)
+  const { error } = await supabase.from('nodes').update({ visibility: to }).in('id', ids)
+  if (error) return
+  // Patch local state immediately — don't wait for the realtime round trip
+  // (which teammates never even get for shared→private, since RLS filters it).
+  for (const n of own) conv.upsert({ ...n, visibility: to })
   // Teammates never receive the shared→private UPDATE (RLS filters realtime
   // events against the new row), so tell them to drop the retracted nodes.
   if (to === 'private') rt.broadcastRetract(ids)
@@ -254,45 +450,44 @@ const ownBranchNodes = computed(() => messages.value.filter((n) => n.author_id =
 const branchIsShared = computed(
   () => ownBranchNodes.value.length > 0 && ownBranchNodes.value.every((n) => n.visibility === 'shared'),
 )
-const showShareModal = ref(false)
-
-// Clicking the header button either opens the turn picker (nothing shared
-// yet, or only part of the branch is) or, if the whole branch is already
-// shared, unshares it in one step — mirrors the button's own label.
+// Clicking the header button either asks for confirmation (nothing shared
+// yet) or, if the whole branch is already shared, unshares it in one step —
+// mirrors the button's own label.
+const pendingShare = ref(false)
 function onShareButtonClick() {
   if (!selectiveSharing.value || !selectedId.value || !ownBranchNodes.value.length) return
   if (branchIsShared.value) unshareBranch()
-  else showShareModal.value = true
+  else pendingShare.value = true
+}
+function cancelShare() {
+  pendingShare.value = false
 }
 
-// Share the caller's own nodes from the root up through (and including)
-// `uptoId` — or, when null, the whole branch ("Share all"). Gives the user
-// control over the unit of sharing instead of all-or-nothing.
-async function shareBranchUpTo(uptoId: string | null) {
-  const lineage = messages.value
-  const cutoff = uptoId ? lineage.findIndex((n) => n.id === uptoId) : lineage.length - 1
-  if (cutoff < 0) return
-  const ids = lineage
-    .slice(0, cutoff + 1)
-    .filter((n) => n.author_id === currentUserId.value && n.visibility === 'private')
-    .map((n) => n.id)
-  showShareModal.value = false
+// Share the whole current conversation (branch) — no partial cutoff, it's
+// all-or-nothing now that the turn picker is gone.
+async function confirmShare() {
+  pendingShare.value = false
+  const own = ownBranchNodes.value.filter((n) => n.visibility === 'private')
+  const ids = own.map((n) => n.id)
   if (!ids.length) return
-  logger.log(
-    'toggle_visibility',
-    { node_ids: ids, to: 'shared', scope: uptoId ? 'branch_partial' : 'branch' },
-    { conversationId, nodeId: selectedId.value! },
-  )
-  await supabase.rpc('share_branch', { node_ids: ids })
+  logger.log('toggle_visibility', { node_ids: ids, to: 'shared', scope: 'branch' }, { conversationId, nodeId: selectedId.value! })
+  const { error } = await supabase.rpc('share_branch', { node_ids: ids })
+  if (error) return
+  // Patch local state immediately — don't wait for the realtime round trip.
+  for (const n of own) conv.upsert({ ...n, visibility: 'shared' })
 }
 
 async function unshareBranch() {
-  const ids = ownBranchNodes.value.filter((n) => n.visibility === 'shared').map((n) => n.id)
+  const own = ownBranchNodes.value.filter((n) => n.visibility === 'shared')
+  const ids = own.map((n) => n.id)
   if (!ids.length) return
   logger.log('toggle_visibility', { node_ids: ids, to: 'private', scope: 'branch' }, { conversationId, nodeId: selectedId.value! })
-  await supabase.from('nodes').update({ visibility: 'private' }).in('id', ids)
-  // Teammates never receive the shared→private UPDATE (RLS filters realtime
-  // events against the new row), so tell them to drop the retracted nodes.
+  const { error } = await supabase.from('nodes').update({ visibility: 'private' }).in('id', ids)
+  if (error) return
+  // Patch local state immediately — don't wait for the realtime round trip
+  // (teammates never receive the shared→private UPDATE at all, since RLS
+  // filters it, which is why broadcastRetract exists for them below).
+  for (const n of own) conv.upsert({ ...n, visibility: 'private' })
   rt.broadcastRetract(ids)
 }
 
@@ -331,7 +526,10 @@ async function createConversation(title: string) {
     .single()
   if (!e && data) {
     await refreshConvos()
-    await navigateTo(`/conversation/${data.id}`)
+    // Same reasoning as the fork navigation below — force a full reload
+    // rather than relying on this page's own remount across two instances
+    // of the same dynamic route.
+    await navigateTo(`/conversation/${data.id}`, { external: true })
   }
 }
 
@@ -375,9 +573,14 @@ async function signOut() {
   <div
     class="workspace"
     :class="{ resizing }"
-    :style="{ gridTemplateColumns: `236px minmax(0, ${1 - splitRatio}fr) minmax(0, ${splitRatio}fr)` }"
+    :style="{
+      gridTemplateColumns: individualLlm
+        ? '1fr'
+        : `236px minmax(0, ${1 - splitRatio}fr) minmax(0, ${splitRatio}fr)`,
+    }"
   >
     <SideNav
+      v-if="!individualLlm"
       :display-name="profile?.display_name ?? ''"
       :is-researcher="profile?.role === 'researcher'"
       :team-name="team?.name ?? '…'"
@@ -397,8 +600,12 @@ async function signOut() {
         :nodes="nodes"
         :selected-id="selectedId"
         :drafting="drafting"
+        :draft-forks="draftForks"
+        :active-draft-key="activeDraftKey"
         :show-visibility="selectiveSharing"
         @select="select"
+        @select-draft="selectDraftFork"
+        @delete-draft="deleteDraftFork"
         @new="startNewChat"
       />
       <div class="threadcol">
@@ -407,33 +614,37 @@ async function signOut() {
             <p class="crumb">{{ drafting ? 'New chat' : forkPointId ? 'Forked chat' : 'Chat' }}</p>
             <h2>{{ drafting ? 'Start a new conversation' : branchTitle }}</h2>
           </div>
-          <button
-            v-if="selectiveSharing && selectedId && !drafting && ownBranchNodes.length"
-            class="sharebtn"
-            :class="{ active: branchIsShared }"
-            @click="onShareButtonClick"
-          >
-            {{ branchIsShared ? 'Unshare branch' : 'Share branch' }}
-          </button>
+          <div class="threadhdrside">
+            <span v-if="forkOriginLabel" class="forkorigin">Forked from {{ forkOriginLabel }}</span>
+            <UiButton
+              v-if="selectiveSharing && selectedId && !drafting && ownBranchNodes.length"
+              variant="soft"
+              class="sharebtn"
+              :class="{ active: branchIsShared }"
+              @click="onShareButtonClick"
+            >
+              {{ branchIsShared ? 'Unshare branch' : 'Share branch' }}
+            </UiButton>
+          </div>
         </header>
-        <ShareBranchModal
-          v-if="showShareModal"
-          :messages="messages"
-          :current-user-id="currentUserId"
-          :member-names="memberNames"
-          @share="shareBranchUpTo"
-          @close="showShareModal = false"
+        <UiConfirmDialog
+          v-if="pendingShare"
+          title="Share this conversation to the team?"
+          @confirm="confirmShare"
+          @cancel="cancelShare"
         />
         <ThreadPanel
           :messages="messages"
-          :fork-point-id="forkPointId"
+          :fork-point-id="forkOriginNodeId"
           :member-names="memberNames"
           :current-user-id="currentUserId"
+          :attachments-by-node="attachmentsByNode"
           :streaming-text="streamingText"
+          :streaming-reasoning="streamingReasoning"
+          :streaming-model="streamingModel"
           :is-streaming="isStreaming"
           :error="error"
           :drafting="drafting"
-          :show-visibility="selectiveSharing"
         />
         <Composer
           :conversation-id="conversationId"
@@ -445,8 +656,8 @@ async function signOut() {
       </div>
     </aside>
 
-    <!-- ── Right: the conversation tree ── -->
-    <main class="treepanel">
+    <!-- ── Right: the conversation tree (hidden for individual_llm) ── -->
+    <main v-if="!individualLlm" class="treepanel">
       <div
         class="splitter"
         role="separator"
@@ -461,12 +672,23 @@ async function signOut() {
           <h1>{{ convo?.title || 'Untitled' }}</h1>
         </div>
         <div class="hdrside">
-          <p class="hdrmeta">
-            {{ branchCount }} branch{{ branchCount === 1 ? '' : 'es' }} · {{ nodes.length }} turn{{ nodes.length === 1 ? '' : 's' }}
-          </p>
-          <button v-if="nodes.length" class="clearbtn" :disabled="isStreaming" @click="clearTree">
+          <div class="hdrmetagroup">
+            <p class="hdrmeta">Last Update at {{ lastUpdateLabel }}</p>
+            <div class="facepile">
+              <UiAvatar
+                v-for="p in contributorAvatars"
+                :key="p.id"
+                class="faceitem"
+                :name="p.name"
+                :color-key="p.id"
+                :size="26"
+                online
+              />
+            </div>
+          </div>
+          <UiButton v-if="nodes.length" variant="danger" size="sm" class="clearbtn" :disabled="isStreaming" @click="clearTree">
             Clear tree
-          </button>
+          </UiButton>
         </div>
       </header>
       <div class="treewrap">
@@ -485,6 +707,13 @@ async function signOut() {
         />
       </div>
     </main>
+
+    <UiConfirmDialog
+      v-if="pendingForkId"
+      title="Fork from here and start a new conversation?"
+      @confirm="confirmFork"
+      @cancel="cancelFork"
+    />
   </div>
 </template>
 
@@ -535,21 +764,14 @@ async function signOut() {
 .hdrtext { min-width: 0; }
 .hdrmeta { margin: 0; flex: none; font-size: 12.5px; color: var(--muted); }
 .hdrside { display: flex; align-items: center; gap: 12px; flex: none; }
-.clearbtn {
-  flex: none;
-  padding: 6px 12px;
-  border: 1px solid #dbb7b1;
-  border-radius: 8px;
-  background: #f9edeb;
-  color: #a2453c;
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
+.hdrmetagroup { display: flex; align-items: center; gap: 10px; flex: none; }
+.facepile { display: flex; align-items: center; }
+.faceitem {
+  border: 2px solid var(--paper);
+  box-sizing: content-box;
 }
-.clearbtn:hover:not(:disabled) { background: #a2453c; border-color: #a2453c; color: #fff; }
-.clearbtn:disabled { opacity: 0.5; cursor: default; }
+.faceitem:not(:first-child) { margin-left: -8px; }
+.clearbtn { flex: none; }
 
 .treepanel {
   position: relative;
@@ -601,20 +823,13 @@ async function signOut() {
   min-width: 0;
   height: 100%;
 }
-.sharebtn {
+.threadhdrside { display: flex; align-items: center; gap: 10px; flex: none; }
+.forkorigin {
   flex: none;
-  padding: 6px 12px;
-  border: 1px solid var(--accent);
-  border-radius: 8px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
+  font-size: 12px;
+  color: var(--muted);
 }
-.sharebtn:hover { background: var(--accent); color: #fff; }
+.sharebtn { flex: none; }
 .sharebtn.active { background: var(--accent); color: #fff; }
 .sharebtn.active:hover { background: var(--accent-soft); color: var(--accent); }
 </style>

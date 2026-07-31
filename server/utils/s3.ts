@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3'
 
 // S3 writer for behavior logs + optional HTML/screenshot snapshots. SERVER ONLY.
 let _s3: S3Client | null = null
@@ -43,4 +43,25 @@ export async function putSnapshot(
       ContentType: contentType,
     }),
   )
+}
+
+// User-uploaded chat attachments (images/PDFs) — see supabase attachments table.
+export async function putUpload(key: string, body: Buffer, contentType: string): Promise<void> {
+  const c = useRuntimeConfig()
+  await client().send(
+    new PutObjectCommand({
+      Bucket: c.s3Bucket as string,
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+    }),
+  )
+}
+
+// Fetches an uploaded attachment's bytes — used server-side to inline the
+// file as base64 into the LLM request (never proxied/presigned to the client).
+export async function getUpload(key: string): Promise<Buffer> {
+  const c = useRuntimeConfig()
+  const res = await client().send(new GetObjectCommand({ Bucket: c.s3Bucket as string, Key: key }))
+  return Buffer.from(await res.Body!.transformToByteArray())
 }

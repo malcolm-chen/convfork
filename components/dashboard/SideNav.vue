@@ -20,6 +20,13 @@ const emit = defineEmits<{
   (e: 'signout'): void
 }>()
 
+const memberQuery = ref('')
+const filteredMembers = computed(() => {
+  const q = memberQuery.value.trim().toLowerCase()
+  if (!q) return props.members
+  return props.members.filter((m) => m.display_name.toLowerCase().includes(q))
+})
+
 const creating = ref(false)
 const newTitle = ref('')
 const newTitleInput = ref<HTMLInputElement | null>(null)
@@ -65,25 +72,28 @@ defineExpose({ openCreate })
 
 <template>
   <aside class="nav">
-    <NuxtLink to="/" class="brandlink"><p class="brand">Conv<em>Fork</em></p></NuxtLink>
-
     <div class="navsection">
-      <p class="navlabel">Team · {{ teamName }}</p>
+      <p class="navlabel">TEAM</p>
+      <label class="search">
+        <AppIcon name="search" :size="13" />
+        <input v-model="memberQuery" type="text" placeholder="Search team…" />
+      </label>
       <ul class="memberlist">
-        <li v-for="m in members" :key="m.id">
-          <span class="avatar" :style="avatarColors(m.id)">{{ avatarInitials(m.display_name) }}</span>
+        <li v-for="m in filteredMembers" :key="m.id">
+          <UiAvatar :name="m.display_name" :color-key="m.id" :size="26" :online="m.id === userId" />
           <span class="mname">
             {{ m.display_name }}<span v-if="m.id === userId" class="you"> · you</span>
           </span>
           <span v-if="m.role" class="mrole">{{ m.role }}</span>
         </li>
+        <li v-if="!filteredMembers.length" class="navempty">No members match “{{ memberQuery }}”</li>
       </ul>
     </div>
 
     <div class="navsection grow">
       <div class="navhead">
         <p class="navlabel">Projects</p>
-        <button class="plus" title="New conversation tree" @click="toggleCreate">+</button>
+        <UiIconButton variant="dark" :size="24" class="plus" title="New conversation tree" @click="toggleCreate">+</UiIconButton>
       </div>
       <form v-if="creating" class="newproj" @submit.prevent="submit">
         <input
@@ -105,15 +115,15 @@ defineExpose({ openCreate })
           </form>
           <template v-else>
             <NuxtLink :to="`/conversation/${c.id}`" :class="{ active: c.id === activeId }">
-              {{ c.title || 'Untitled' }}
+              <span class="ptitle">{{ c.title || 'Untitled' }}</span>
             </NuxtLink>
             <template v-if="c.id === activeId">
-              <button class="pact" title="Rename project" @click="startRename(c)">
+              <UiIconButton variant="dark" :size="22" class="pact" title="Rename project" @click="startRename(c)">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /></svg>
-              </button>
-              <button class="pact danger" title="Delete project" @click="emit('delete', c.id)">
+              </UiIconButton>
+              <UiIconButton variant="dark" :size="22" class="pact danger" title="Delete project" @click="emit('delete', c.id)">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
-              </button>
+              </UiIconButton>
             </template>
           </template>
         </li>
@@ -123,10 +133,10 @@ defineExpose({ openCreate })
 
     <div class="navsection settings">
       <div class="me">
-        <span class="avatar" :style="avatarColors(userId || displayName)">{{ avatarInitials(displayName || '?') }}</span>
+        <UiAvatar :name="displayName || '?'" :color-key="userId || displayName" :size="26" />
         <span class="mname">{{ displayName }}</span>
       </div>
-      <button class="settingsbtn" @click="emit('signout')">Sign out</button>
+      <UiButton variant="dark" class="settingsbtn" @click="emit('signout')">Sign out</UiButton>
     </div>
   </aside>
 </template>
@@ -135,66 +145,64 @@ defineExpose({ openCreate })
 .nav {
   display: flex;
   flex-direction: column;
-  gap: 26px;
+  gap: 22px;
   box-sizing: border-box;
   padding: 26px 20px;
-  border-right: 2px solid var(--panel-edge);
-  background: var(--paper);
+  background: var(--nav-bg);
+  color: var(--nav-ink);
   position: sticky;
   top: 0;
   height: 100vh;
   overflow-y: auto;
 }
-.brandlink { text-decoration: none; color: inherit; }
-.brand {
-  margin: 0;
-  font-family: 'Fraunces', serif;
-  font-weight: 600;
-  font-size: 21px;
-  letter-spacing: -0.01em;
-}
-.brand em { font-style: italic; color: var(--accent); }
-
 .navlabel {
   margin: 0 0 10px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.09em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--nav-muted);
 }
-.navsection.grow { flex: 1; min-height: 0; }
+.navsection.grow { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .navhead { display: flex; align-items: center; justify-content: space-between; }
 .navhead .navlabel { margin-bottom: 0; }
-.plus {
-  width: 24px; height: 24px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--card);
-  color: var(--ink);
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-  transition: all 0.15s ease;
+
+.search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 2px 0 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--nav-line);
+  border-radius: 8px;
+  background: var(--nav-card);
+  color: var(--nav-muted);
 }
-.plus:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+.search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  color: var(--nav-ink);
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+.search input::placeholder { color: var(--nav-muted); }
 
 .memberlist, .projlist { list-style: none; margin: 10px 0 0; padding: 0; }
+.navsection.grow .projlist { flex: 1; min-height: 0; overflow-y: auto; }
 .memberlist li {
   display: flex; align-items: center; gap: 9px;
   padding: 6px 4px;
   font-size: 13.5px;
+  border-radius: 8px;
+  transition: background 0.12s ease;
 }
-.avatar {
-  flex: none;
-  width: 26px; height: 26px;
-  display: grid; place-items: center;
-  border-radius: 50%;
-  font-size: 10.5px; font-weight: 600;
-}
+.memberlist li:hover { background: var(--nav-card); }
 .mname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.you { color: var(--muted); }
-.mrole { margin-left: auto; font-size: 11px; color: var(--muted); }
+.you { color: var(--nav-muted); }
+.mrole { margin-left: auto; font-size: 11px; color: var(--nav-muted); }
 
 .newproj { margin: 10px 0 4px; }
 .newproj input {
@@ -205,41 +213,29 @@ defineExpose({ openCreate })
   border-radius: 8px;
   font: inherit;
   font-size: 13px;
-  background: var(--card);
+  background: var(--nav-card);
+  color: var(--nav-ink);
 }
 .projlist li { display: flex; align-items: center; gap: 4px; }
 .projlist li a {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex: 1;
   min-width: 0;
   padding: 7px 9px;
   border-radius: 8px;
-  color: var(--ink);
+  color: var(--nav-ink);
   text-decoration: none;
   font-size: 13.5px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   transition: background 0.15s ease;
 }
-.projlist li a:hover { background: var(--accent-soft); color: var(--accent); }
+.ptitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.projlist li a:hover { background: var(--nav-card); color: #fff; }
 .projlist li a.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.navempty { padding: 6px 4px; font-size: 12.5px; color: var(--muted); }
+.navempty { padding: 6px 4px; font-size: 12.5px; color: var(--nav-muted); }
 
-.pact {
-  flex: none;
-  width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--card);
-  color: var(--muted);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.pact:hover { border-color: var(--accent); color: var(--accent); }
-.pact.danger:hover { border-color: #a2453c; color: #a2453c; background: #f9edeb; }
+.pact.danger:hover { border-color: var(--danger); color: var(--danger); }
 
 .renameform { flex: 1; min-width: 0; }
 .renameform input {
@@ -250,27 +246,11 @@ defineExpose({ openCreate })
   border-radius: 8px;
   font: inherit;
   font-size: 13px;
-  background: var(--card);
+  background: var(--nav-card);
+  color: var(--nav-ink);
 }
 
-.settings { border-top: 1px solid var(--line); padding-top: 16px; }
+.settings { border-top: 1px solid var(--nav-line); padding-top: 16px; }
 .me { display: flex; align-items: center; gap: 9px; font-size: 13.5px; margin-bottom: 10px; }
-.settingsbtn {
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
-  margin-top: 6px;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--card);
-  color: var(--ink);
-  font: inherit;
-  font-size: 13px;
-  text-align: left;
-  text-decoration: none;
-  cursor: pointer;
-  transition: border-color 0.15s ease;
-}
-.settingsbtn:hover { border-color: var(--accent); color: var(--accent); }
+.settingsbtn { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; text-align: left; }
 </style>

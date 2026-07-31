@@ -31,20 +31,21 @@ export function validateSessionId(sessionId: string): string {
   return v
 }
 
-export type SharingCondition = 'default' | 'selective_sharing'
+export type SharingCondition = 'default' | 'selective_sharing' | 'individual_llm'
 
 export function validateSharingCondition(raw: unknown): SharingCondition {
   const v = typeof raw === 'string' ? raw.trim() : ''
-  if (v === 'default' || v === 'selective_sharing') return v
+  if (v === 'default' || v === 'selective_sharing' || v === 'individual_llm') return v
   throw createError({
     statusCode: 400,
-    statusMessage: 'condition must be "default" or "selective_sharing"',
+    statusMessage: 'condition must be "default", "selective_sharing", or "individual_llm"',
   })
 }
 
 export function conditionLabel(c: SharingCondition | string | null | undefined): string {
   if (c === 'default') return 'Default (auto-public)'
   if (c === 'selective_sharing') return 'Selective sharing'
+  if (c === 'individual_llm') return 'Individual LLM'
   return '—'
 }
 

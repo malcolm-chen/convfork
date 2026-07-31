@@ -10,8 +10,10 @@ export interface TreeNode {
   author_id: string
   role: 'user' | 'assistant'
   content: string
+  reasoning: string | null
   visibility: 'private' | 'shared'
   is_fork_point: boolean
+  model: string | null
   created_at: string
 }
 
@@ -23,10 +25,21 @@ export interface Reaction {
   created_at: string
 }
 
+export interface Attachment {
+  id: string
+  node_id: string
+  filename: string
+  content_type: string
+  size_bytes: number
+  kind: 'image' | 'pdf'
+  created_at: string
+}
+
 export function useConversation(conversationId: string) {
   const supabase = useSupabaseClient()
   const nodesById = reactive(new Map<string, TreeNode>())
   const reactionsByNode = reactive(new Map<string, Reaction[]>())
+  const attachmentsByNode = reactive(new Map<string, Attachment[]>())
   const lastSeen = ref('1970-01-01T00:00:00Z')
 
   const nodes = computed(() => Array.from(nodesById.values()))
@@ -62,6 +75,14 @@ export function useConversation(conversationId: string) {
     }
   }
 
+  function addAttachment(a: Attachment) {
+    const arr = attachmentsByNode.get(a.node_id) ?? []
+    if (!arr.some((x) => x.id === a.id)) {
+      arr.push(a)
+      attachmentsByNode.set(a.node_id, arr)
+    }
+  }
+
   async function load() {
     const { data, error } = await supabase
       .from('nodes')
@@ -79,6 +100,7 @@ export function useConversation(conversationId: string) {
       if (!visible.has(id)) nodesById.delete(id)
     }
     await loadReactions()
+    await loadAttachments()
   }
 
   // Drop nodes we can no longer see (author retracted them mid-session).
@@ -86,6 +108,7 @@ export function useConversation(conversationId: string) {
     for (const id of ids) {
       nodesById.delete(id)
       reactionsByNode.delete(id)
+      attachmentsByNode.delete(id)
     }
   }
 
@@ -95,6 +118,14 @@ export function useConversation(conversationId: string) {
     const { data } = await supabase.from('reactions').select('*').in('node_id', ids)
     reactionsByNode.clear()
     for (const r of (data ?? []) as Reaction[]) addReaction(r)
+  }
+
+  async function loadAttachments() {
+    const ids = nodes.value.map((n) => n.id)
+    if (!ids.length) return
+    const { data } = await supabase.from('attachments').select('*').in('node_id', ids)
+    attachmentsByNode.clear()
+    for (const a of (data ?? []) as Attachment[]) addAttachment(a)
   }
 
   // Fetch only nodes created since lastSeen — used on realtime reconnect (§6.5 egress).
@@ -113,6 +144,7 @@ export function useConversation(conversationId: string) {
   async function fetchLineage(id: string) {
     const { data } = await supabase.rpc('get_lineage', { target: id })
     for (const n of (data ?? []) as TreeNode[]) upsert(n)
+    await loadAttachments()
   }
 
   function childrenOf(id: string) {
@@ -134,15 +166,18 @@ export function useConversation(conversationId: string) {
   return {
     nodesById,
     reactionsByNode,
+    attachmentsByNode,
     nodes,
     lastSeen,
     load,
     loadReactions,
+    loadAttachments,
     deltaFetch,
     fetchLineage,
     upsert,
     addReaction,
     removeReaction,
+    addAttachment,
     removeNodes,
     childrenOf,
     lineageOf,

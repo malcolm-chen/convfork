@@ -114,11 +114,11 @@ const layout = computed(() => {
 
 <style scoped>
 .minitree { display: block; width: 100%; height: 100%; }
-.edge { fill: none; stroke: #cfc9bb; stroke-width: 1.3; }
+.edge { fill: none; stroke: #b7b7c0; stroke-width: 1.3; }
 .edge.ghost { stroke-dasharray: 3 4; opacity: 0.7; }
-.node { fill: #8f887a; }
-.root { fill: #23262f; }
-.fork { fill: #f6f5f1; stroke: #2f56d9; stroke-width: 1.6; }
-.tip { fill: #2f56d9; }
-.ghostdot { fill: #ddd8cc; }
+.node { fill: var(--muted); }
+.root { fill: var(--ink); }
+.fork { fill: var(--card); stroke: var(--accent); stroke-width: 1.6; }
+.tip { fill: var(--accent); }
+.ghostdot { fill: var(--line); }
 </style>

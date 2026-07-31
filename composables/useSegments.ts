@@ -66,3 +66,29 @@ export function segmentize<T extends SegmentNodeLike>(nodes: T[]): Segment<T>[] 
   }
   return segments
 }
+
+/**
+ * Sequential "C" numbering for the canvas badges (C1, C2, …) and the
+ * "Forked from C1-2" breadcrumb — ordered by when each segment was *first
+ * shared*, not when it was created. A segment with no shared node at all
+ * (private, own-only) isn't part of this order and won't appear in the map.
+ */
+export function sharedOrder<T extends SegmentNodeLike & { visibility: string; created_at: string }>(
+  segments: Segment<T>[],
+): Map<string, number> {
+  const withShared = segments
+    .map((s) => {
+      const sharedTimes = s.nodes.filter((n) => n.visibility === 'shared').map((n) => n.created_at)
+      return sharedTimes.length
+        ? { id: s.id, firstShared: sharedTimes.reduce((a, b) => (a < b ? a : b)) }
+        : null
+    })
+    .filter((x): x is { id: string; firstShared: string } => x !== null)
+    .sort((a, b) => a.firstShared.localeCompare(b.firstShared))
+  return new Map(withShared.map((x, i) => [x.id, i + 1]))
+}
+
+/** 1-based position of a node within its own segment's chain (head → tip). */
+export function turnNumberOf<T extends SegmentNodeLike>(segment: Segment<T>, nodeId: string): number {
+  return segment.nodes.findIndex((n) => n.id === nodeId) + 1
+}

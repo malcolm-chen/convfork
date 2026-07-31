@@ -1,10 +1,12 @@
 import { v4 as uuidv4 } from 'uuid'
+import type { AttachmentRef } from '~/composables/useFileUpload'
 
 // Calls /api/chat and consumes the SSE token stream into reactive state.
 // Does NOT write to the DB — persistence is server-side; the new nodes arrive
 // back through Supabase Realtime (useRealtime).
 export function useLLMStream() {
   const streamingText = ref('')
+  const streamingReasoning = ref('')
   const isStreaming = ref(false)
   const error = ref<string | null>(null)
   const logger = useActionLogger()
@@ -14,19 +16,34 @@ export function useLLMStream() {
     parentNodeId: string | null
     userText: string
     model: string
+    thinking?: string
+    attachments?: AttachmentRef[]
     isFork?: boolean
+    // Fired synchronously with the (client-generated) user node id, before the
+    // request is even sent — lets the caller render the user's turn right
+    // away instead of waiting on the full round trip / SSE stream to finish.
+    onUserNodeId?: (id: string) => void
   }) {
     isStreaming.value = true
     streamingText.value = ''
+    streamingReasoning.value = ''
     error.value = null
 
     const userNodeId = uuidv4()
     const assistantNodeId = uuidv4()
+    opts.onUserNodeId?.(userNodeId)
     const startedAt = performance.now()
 
     logger.log(
       'send_message',
-      { text: opts.userText, parent_node_id: opts.parentNodeId, len: opts.userText.length },
+      {
+        text: opts.userText,
+        parent_node_id: opts.parentNodeId,
+        len: opts.userText.length,
+        model: opts.model,
+        thinking: opts.thinking,
+        attachment_count: opts.attachments?.length ?? 0,
+      },
       { conversationId: opts.conversationId, nodeId: userNodeId },
     )
 
@@ -52,6 +69,7 @@ export function useLLMStream() {
           if (!t.startsWith('data:')) continue
           const payload = JSON.parse(t.slice(5).trim())
           if (payload.t) streamingText.value += payload.t
+          else if (payload.r) streamingReasoning.value += payload.r
           else if (payload.error) error.value = payload.error
         }
       }
@@ -70,5 +88,5 @@ export function useLLMStream() {
     return { userNodeId, assistantNodeId }
   }
 
-  return { streamingText, isStreaming, error, send }
+  return { streamingText, streamingReasoning, isStreaming, error, send }
 }

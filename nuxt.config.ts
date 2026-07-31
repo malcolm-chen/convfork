@@ -3,6 +3,12 @@ export default defineNuxtConfig({
   compatibilityDate: '2025-01-01',
   devtools: { enabled: true },
 
+  // The app-manifest virtual module (client-side route-rules/prerendering
+  // hints) fails to resolve in this dev setup ("#app-manifest" pre-transform
+  // error) — this app doesn't use routeRules/prerendering, so it's dead
+  // weight; disabling it stops the noisy (but otherwise harmless) log spam.
+  experimental: { appManifest: false },
+
   modules: ['@nuxtjs/supabase'],
 
   app: {
@@ -20,7 +26,7 @@ export default defineNuxtConfig({
   },
 
   // Register components by bare filename (no directory prefix) — the app refers to
-  // them flat, e.g. <ReasoningTree>, <Composer>, <ReactionBar>, <ForkButton>.
+  // them flat, e.g. <ReasoningTree>, <Composer>, <ReactionBar>, <TreeNode>.
   // Without this, Nuxt names nested components <TreeReasoningTree>/<ThreadComposer>
   // etc., which silently fail to resolve and render as empty comments.
   components: [{ path: '~/components', pathPrefix: false }],
@@ -28,7 +34,6 @@ export default defineNuxtConfig({
   css: [
     '@vue-flow/core/dist/style.css',
     '@vue-flow/core/dist/theme-default.css',
-    '@vue-flow/controls/dist/style.css',
   ],
 
   // @nuxtjs/supabase injects useSupabaseClient() / serverSupabaseUser() and

@@ -7,6 +7,14 @@
 
 import { DEFAULT_MODEL_ID, MODEL_OPTIONS } from '../../shared/models'
 
+interface AttachmentRef {
+  key: string
+  filename: string
+  contentType: string
+  size: number
+  kind: 'image' | 'pdf'
+}
+
 interface ChatBody {
   conversationId: string
   parentNodeId: string | null
@@ -14,6 +22,8 @@ interface ChatBody {
   userNodeId?: string
   assistantNodeId?: string
   model?: string
+  thinking?: string
+  attachments?: AttachmentRef[]
   isFork?: boolean
 }
 
@@ -25,6 +35,14 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: 'conversationId and userText required' })
   }
   const model = body.model && MODEL_OPTIONS.some((m) => m.id === body.model) ? body.model : DEFAULT_MODEL_ID
+  const modelSupportsThinking = MODEL_OPTIONS.find((m) => m.id === model)?.supportsThinking
+  const thinking = modelSupportsThinking ? body.thinking : undefined
+
+  // Attachments were uploaded (and S3-key-prefixed) for this conversation by
+  // /api/upload — reject anything that doesn't match, since the key is the
+  // only thing standing between this insert and referencing someone else's file.
+  const keyPrefix = `uploads/${body.conversationId}/`
+  const attachments = (body.attachments ?? []).filter((a) => a.key.startsWith(keyPrefix))
 
   const admin = useSupabaseAdmin()
 
@@ -99,6 +117,20 @@ export default defineEventHandler(async (event) => {
   )
   if (userErr) throw createError({ statusCode: 500, statusMessage: `persist user node: ${userErr.message}` })
 
+  if (attachments.length) {
+    const { error: attErr } = await admin.from('attachments').insert(
+      attachments.map((a) => ({
+        node_id: userNodeId,
+        filename: a.filename,
+        content_type: a.contentType,
+        size_bytes: a.size,
+        s3_key: a.key,
+        kind: a.kind,
+      })),
+    )
+    if (attErr) throw createError({ statusCode: 500, statusMessage: `persist attachments: ${attErr.message}` })
+  }
+
   // 2) build context
   const messages = await buildLineageMessages(admin, userNodeId)
 
@@ -115,6 +147,7 @@ export default defineEventHandler(async (event) => {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let full = ''
+      let reasoning = ''
       let errMsg: string | null = null
       const safeEnqueue = (obj: unknown) => {
         try {
@@ -125,9 +158,14 @@ export default defineEventHandler(async (event) => {
       }
 
       try {
-        for await (const token of callLLM(messages, model)) {
-          full += token
-          safeEnqueue({ t: token })
+        for await (const chunk of callLLM(messages, model, thinking)) {
+          if (chunk.type === 'reasoning') {
+            reasoning += chunk.text
+            safeEnqueue({ r: chunk.text })
+          } else {
+            full += chunk.text
+            safeEnqueue({ t: chunk.text })
+          }
         }
       } catch (e) {
         errMsg = e instanceof Error ? e.message : 'generation failed'
@@ -145,7 +183,9 @@ export default defineEventHandler(async (event) => {
               author_id: user.id,
               role: 'assistant',
               content,
+              reasoning: reasoning || null,
               visibility,
+              model,
             },
             { onConflict: 'id' },
           )

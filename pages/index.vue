@@ -332,7 +332,7 @@ async function signOut() {
         </NuxtLink>
         <div v-if="!convCards.length" class="treesempty">
           <p>No conversation trees yet.</p>
-          <button class="cta" @click="sideNav?.openCreate()">Start the first one</button>
+          <UiButton @click="sideNav?.openCreate()">Start the first one</UiButton>
         </div>
       </section>
     </main>
@@ -374,11 +374,7 @@ async function signOut() {
 
 <style scoped>
 /* ── Theme (tokens come from :root in app.vue) ── */
-.dash, .joinpage {
-  background:
-    radial-gradient(1100px 500px at 80% -10%, #eef0e9 0%, transparent 60%),
-    var(--paper);
-}
+.dash, .joinpage { background: var(--paper); }
 
 .brand {
   margin: 0;
@@ -465,8 +461,8 @@ async function signOut() {
   transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
 }
 .treecard:hover {
-  border-color: #c8cfe8;
-  box-shadow: 0 10px 26px rgba(29, 32, 41, 0.07);
+  border-color: #d3cdf7;
+  box-shadow: 0 10px 26px rgba(20, 20, 30, 0.07);
   transform: translateY(-1px);
 }
 .viz {
@@ -507,13 +503,6 @@ async function signOut() {
   border-radius: 14px;
 }
 .treesempty p { margin: 0 0 14px; }
-.cta {
-  padding: 9px 18px;
-  border: 0; border-radius: 9px;
-  background: var(--accent); color: #fff;
-  font: inherit; font-size: 13.5px; font-weight: 500;
-  cursor: pointer;
-}
 
 /* ── Right rail ── */
 .rail {
@@ -569,7 +558,7 @@ async function signOut() {
   background: var(--accent); color: #fff;
   font: inherit; font-size: 13px; cursor: pointer;
 }
-.join button.requested { background: #e7e4da; color: var(--muted); cursor: default; }
+.join button.requested { background: var(--line); color: var(--muted); cursor: default; }
 .join .empty { color: var(--muted); justify-content: center; font-size: 13.5px; }
 .signout-link {
   margin-top: 18px;

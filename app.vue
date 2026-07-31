@@ -6,15 +6,25 @@
 
 <style>
 :root {
-  --paper: #f6f5f1;
-  --card: #fffefb;
-  --ink: #1d2029;
-  --muted: #7a7466;
-  --line: #e6e2d7;
+  --paper: #fafafa;
+  --card: #ffffff;
+  --ink: #17171a;
+  --muted: #8a8a93;
+  --line: #e7e7ec;
   /* Stronger separators between major panels (nav / canvas / chat) */
-  --panel-edge: #c4beaf;
-  --accent: #2f56d9;
-  --accent-soft: #edf1fd;
+  --panel-edge: #e2e2e8;
+  --accent: #6c5ce7;
+  --accent-soft: #eef0fd;
+  --danger: #a2453c;
+  --danger-soft: #f9edeb;
+
+  /* Dark left rail (team + projects) */
+  --nav-bg: #0e0e10;
+  --nav-card: #1a1a1d;
+  --nav-ink: #f5f5f7;
+  --nav-muted: #9a9aa3;
+  --nav-line: #262629;
+  --nav-online: #2ecc71;
 }
 body {
   margin: 0;

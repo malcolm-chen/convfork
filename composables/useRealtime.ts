@@ -1,5 +1,5 @@
 import type { RealtimeChannel } from '@supabase/supabase-js'
-import type { TreeNode, Reaction } from '~/composables/useConversation'
+import type { TreeNode, Reaction, Attachment } from '~/composables/useConversation'
 
 // Subscribes to nodes (INSERT+UPDATE) and reactions (INSERT+DELETE) for a
 // conversation. All updates are idempotent upserts-by-id (§8.3). A visibility
@@ -52,6 +52,16 @@ export function useRealtime(
         (p) => {
           const old = p.old as Partial<Reaction>
           if (old?.id) conv.removeReaction(old.id, old.node_id)
+        },
+      )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'attachments' },
+        (p) => {
+          const a = p.new as Attachment
+          // RLS already limits which attachment inserts reach us; keep only
+          // ones on nodes we know about (mirrors the reactions handler above).
+          if (conv.nodesById.has(a.node_id)) conv.addAttachment(a)
         },
       )
       // shared→private is invisible to teammates over postgres_changes (RLS

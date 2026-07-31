@@ -1,18 +1,32 @@
 <script setup lang="ts">
-import type { TreeNode } from '~/composables/useConversation'
+import type { Attachment, TreeNode } from '~/composables/useConversation'
 import { renderMarkdown } from '~/utils/markdown'
+import { MODEL_OPTIONS } from '~/shared/models'
 
 const props = defineProps<{
   messages: TreeNode[] // linear path from root → selected node
   forkPointId?: string | null // when set, messages up to here are prior history
   memberNames?: Record<string, string>
   currentUserId?: string
+  attachmentsByNode?: Map<string, Attachment[]>
   streamingText: string
+  streamingReasoning?: string
+  streamingModel?: string | null // the model backbone the in-flight reply is using
   isStreaming: boolean
   error: string | null
   drafting?: boolean
-  showVisibility?: boolean
 }>()
+
+function attachmentsOf(m: TreeNode): Attachment[] {
+  return props.attachmentsByNode?.get(m.id) ?? []
+}
+
+// Short display label for a model id (e.g. "gpt-5.5" → "GPT-5.5"), shown as a
+// badge on the AI avatar so readers can tell which backbone answered.
+function modelLabel(modelId?: string | null) {
+  if (!modelId) return null
+  return MODEL_OPTIONS.find((m) => m.id === modelId)?.label ?? modelId
+}
 
 // When forked, split the lineage: everything up to and including the fork
 // point is inherited history; what follows (if anything yet) is the new branch.
@@ -27,18 +41,8 @@ function authorName(m: TreeNode) {
   return props.memberNames?.[m.author_id] ?? 'Unknown'
 }
 
-function turnMeta(m: TreeNode) {
-  if (props.showVisibility === false) return authorName(m)
-  return `${authorName(m)} · ${m.visibility}`
-}
-
-function initials(m: TreeNode) {
-  if (m.role === 'assistant') return 'AI'
-  return avatarInitials(authorName(m))
-}
-
-function userAvatarStyle(m: TreeNode) {
-  return avatarColors(m.author_id)
+function turnTime(m: TreeNode) {
+  return new Date(m.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }
 
 // Keep the newest message in view as the thread grows or tokens stream in.
@@ -51,27 +55,33 @@ watch(
 
 <template>
   <div ref="scroller" class="thread">
-    <template v-for="m in prior" :key="m.id">
-      <!-- Assistant: ChatGPT-style full-width, no bubble, markdown-rendered -->
-      <div v-if="m.role === 'assistant'" class="turn assistant prior">
-        <span class="mavatar assistant">AI</span>
-        <div class="turnbody">
-          <div class="meta">{{ turnMeta(m) }}</div>
-          <ClientOnly>
-            <div class="body md" v-html="renderMarkdown(m.content)" />
-            <template #fallback><div class="body">{{ m.content }}</div></template>
-          </ClientOnly>
+    <div v-if="prior.length" class="priorwrap">
+      <template v-for="m in prior" :key="m.id">
+        <!-- Assistant: ChatGPT-style full-width, no bubble, markdown-rendered -->
+        <div v-if="m.role === 'assistant'" class="turn assistant prior">
+          <span class="aiavatar">AI</span>
+          <div class="turnbody">
+            <div v-if="modelLabel(m.model)" class="meta">{{ modelLabel(m.model) }}</div>
+            <ThinkingBlock v-if="m.reasoning" :reasoning="m.reasoning" />
+            <ClientOnly>
+              <div class="body md" v-html="renderMarkdown(m.content)" />
+              <template #fallback><div class="body">{{ m.content }}</div></template>
+            </ClientOnly>
+            <div class="time">{{ turnTime(m) }}</div>
+          </div>
         </div>
-      </div>
-      <!-- User: right-aligned bubble -->
-      <div v-else class="msg user prior">
-        <span class="mavatar user" :style="userAvatarStyle(m)">{{ initials(m) }}</span>
-        <div class="bubble">
-          <div class="meta">{{ turnMeta(m) }}</div>
-          <div class="body">{{ m.content }}</div>
+        <!-- User: right-aligned bubble -->
+        <div v-else class="msg user prior">
+          <UiAvatar class="mavatar" :name="authorName(m)" :color-key="m.author_id" :size="28" />
+          <div class="bubble">
+            <div class="meta">{{ authorName(m) }}</div>
+            <AttachmentList :attachments="attachmentsOf(m)" />
+            <div v-if="m.content" class="body">{{ m.content }}</div>
+            <div class="time">{{ turnTime(m) }}</div>
+          </div>
         </div>
-      </div>
-    </template>
+      </template>
+    </div>
 
     <div v-if="forkIdx >= 0" class="forkdivider">
       <span>This is a forked conversation. Continue chatting with the agent below.</span>
@@ -79,28 +89,33 @@ watch(
 
     <template v-for="m in fresh" :key="m.id">
       <div v-if="m.role === 'assistant'" class="turn assistant">
-        <span class="mavatar assistant">AI</span>
+        <span class="aiavatar">AI</span>
         <div class="turnbody">
-          <div class="meta">{{ turnMeta(m) }}</div>
+          <div v-if="modelLabel(m.model)" class="meta">{{ modelLabel(m.model) }}</div>
+          <ThinkingBlock v-if="m.reasoning" :reasoning="m.reasoning" />
           <ClientOnly>
             <div class="body md" v-html="renderMarkdown(m.content)" />
             <template #fallback><div class="body">{{ m.content }}</div></template>
           </ClientOnly>
+          <div class="time">{{ turnTime(m) }}</div>
         </div>
       </div>
       <div v-else class="msg user">
-        <span class="mavatar user" :style="userAvatarStyle(m)">{{ initials(m) }}</span>
+        <UiAvatar class="mavatar" :name="authorName(m)" :color-key="m.author_id" :size="28" />
         <div class="bubble">
-          <div class="meta">{{ turnMeta(m) }}</div>
-          <div class="body">{{ m.content }}</div>
+          <div class="meta">{{ authorName(m) }}</div>
+          <AttachmentList :attachments="attachmentsOf(m)" />
+          <div v-if="m.content" class="body">{{ m.content }}</div>
+          <div class="time">{{ turnTime(m) }}</div>
         </div>
       </div>
     </template>
 
     <div v-if="isStreaming" class="turn assistant streaming">
-      <span class="mavatar assistant">AI</span>
+      <span class="aiavatar">AI</span>
       <div class="turnbody">
-        <div class="meta">Agent · streaming…</div>
+        <div class="meta">{{ modelLabel(streamingModel) ? `${modelLabel(streamingModel)} · Streaming…` : 'Streaming…' }}</div>
+        <ThinkingBlock v-if="streamingReasoning" :reasoning="streamingReasoning" :auto-expand="!streamingText" />
         <ClientOnly>
           <div class="body md" v-html="renderMarkdown(streamingText)" />
           <template #fallback><div class="body">{{ streamingText }}</div></template>
@@ -131,6 +146,18 @@ watch(
   gap: 12px;
 }
 
+/* Forked conversations get a tinted backdrop over the inherited history only
+   — it stops at the fork divider, never bleeding into the continued branch. */
+.priorwrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--accent-soft);
+  border-radius: 14px;
+  padding: 12px 12px 14px;
+  margin: -2px -2px 0;
+}
+
 /* ── User bubble (unchanged look) ── */
 .msg { display: flex; gap: 9px; max-width: 94%; }
 .msg.user { align-self: flex-end; flex-direction: row-reverse; }
@@ -141,7 +168,8 @@ watch(
 .turn.prior { opacity: 0.72; }
 .turnbody { min-width: 0; flex: 1; padding-top: 1px; }
 
-.mavatar {
+.mavatar { flex: none; margin-top: 2px; }
+.aiavatar {
   flex: none;
   width: 28px;
   height: 28px;
@@ -151,9 +179,9 @@ watch(
   font-size: 10.5px;
   font-weight: 600;
   margin-top: 2px;
+  background: var(--ink);
+  color: var(--paper);
 }
-.mavatar.user { /* per-user colors applied via :style */ }
-.mavatar.assistant { background: var(--ink); color: var(--paper); }
 
 .bubble { min-width: 0; padding: 9px 12px; border-radius: 12px; }
 .msg.user .bubble { background: var(--accent); color: #fff; border-top-right-radius: 4px; }
@@ -161,6 +189,10 @@ watch(
 
 .meta { font-size: 10px; opacity: 0.7; margin-bottom: 4px; }
 .body { white-space: pre-wrap; font-size: 13.5px; line-height: 1.5; overflow-wrap: break-word; }
+.time { margin-top: 4px; text-align: right; font-size: 10px; font-variant-numeric: tabular-nums; }
+.bubble .time { color: rgba(255, 255, 255, 0.75); }
+.msg.prior .bubble .time { color: rgba(255, 255, 255, 0.6); }
+.turnbody .time { color: var(--muted); text-align: left; }
 .caret { display: inline-block; margin-left: 1px; animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
@@ -235,6 +267,6 @@ watch(
 }
 .forkdivider span { max-width: 260px; }
 
-.err { color: #c0392b; font-size: 13px; }
+.err { color: var(--danger); font-size: 13px; }
 .empty { color: var(--muted); text-align: center; margin-top: 48px; font-size: 13.5px; line-height: 1.6; }
 </style>

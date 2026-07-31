@@ -104,14 +104,14 @@ async function testLogin() {
         />
       </label>
 
-      <button :disabled="busy" type="submit">
+      <UiButton :disabled="busy" type="submit">
         {{ busy ? 'Signing in…' : 'Sign in' }}
-      </button>
+      </UiButton>
 
       <div class="divider"><span>or</span></div>
-      <button type="button" class="test" :disabled="busy" @click="testLogin">
+      <UiButton type="button" variant="ghost" class="test" :disabled="busy" @click="testLogin">
         Test login (full-access account)
-      </button>
+      </UiButton>
 
       <p v-if="error" class="err">{{ error }}</p>
 
@@ -139,9 +139,9 @@ async function testLogin() {
         />
       </label>
 
-      <button :disabled="busy" type="submit">
+      <UiButton :disabled="busy" type="submit">
         {{ busy ? 'Checking…' : 'Enter admin' }}
-      </button>
+      </UiButton>
 
       <p v-if="error" class="err">{{ error }}</p>
 
@@ -158,7 +158,7 @@ async function testLogin() {
   min-height: 100vh;
   align-items: center;
   justify-content: center;
-  background: #f6f7f9;
+  background: var(--paper);
 }
 .card {
   display: flex;
@@ -166,37 +166,27 @@ async function testLogin() {
   gap: 10px;
   width: 340px;
   padding: 28px;
-  background: #fff;
+  background: var(--card);
   border-radius: 12px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 6px 24px rgba(20, 20, 30, 0.08);
 }
-h1 { margin: 0; font-size: 22px; }
-.sub { margin: 0 0 8px; color: #666; font-size: 13px; }
-label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: #555; font-weight: 600; }
+h1 { margin: 0; font-size: 22px; font-family: 'Fraunces', serif; font-weight: 600; }
+.sub { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--ink); font-weight: 600; }
 input {
   padding: 10px;
-  border: 1px solid #d7dbe0;
+  border: 1px solid var(--line);
   border-radius: 8px;
   font-size: 14px;
   font-weight: 400;
-  color: #111;
+  color: var(--ink);
+  background: var(--card);
 }
-button[type='submit'] {
-  margin-top: 4px;
-  padding: 10px;
-  border: 0;
-  border-radius: 8px;
-  background: #2f6feb;
-  color: #fff;
-  font-weight: 600;
-  cursor: pointer;
-}
-button:disabled { opacity: 0.6; cursor: default; }
 .divider {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #aaa;
+  color: var(--muted);
   font-size: 12px;
   margin: 4px 0;
 }
@@ -205,27 +195,19 @@ button:disabled { opacity: 0.6; cursor: default; }
   content: '';
   flex: 1;
   height: 1px;
-  background: #e3e6ea;
+  background: var(--line);
 }
-.test {
-  padding: 10px;
-  border: 1px solid #2f6feb;
-  border-radius: 8px;
-  background: #fff;
-  color: #2f6feb;
-  font-weight: 600;
-  cursor: pointer;
-}
+.test { width: 100%; border-color: var(--accent); color: var(--accent); }
 .admin-link {
   margin-top: 6px;
   padding: 0;
   border: 0;
   background: none;
-  color: #666;
+  color: var(--muted);
   font-size: 13px;
   cursor: pointer;
   text-align: center;
 }
-.admin-link:hover { color: #2f6feb; }
-.err { color: #c0392b; font-size: 13px; margin: 4px 0 0; }
+.admin-link:hover { color: var(--accent); }
+.err { color: var(--danger); font-size: 13px; margin: 4px 0 0; }
 </style>

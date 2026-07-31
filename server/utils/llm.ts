@@ -2,15 +2,51 @@
 // The backbone is picked per-request (see shared/models.ts + the composer's
 // dropdown), not fixed in config.
 
-import { DEFAULT_MODEL_ID } from '../../shared/models'
+import { DEFAULT_MODEL_ID, MODEL_OPTIONS, type ThinkingEffort } from '../../shared/models'
+
+// Content blocks follow the OpenAI Chat Completions multimodal shape —
+// LiteLLM normalizes these into each provider's native format (verified live:
+// image_url and file/file_data both work through the proxy for Anthropic).
+export type LLMContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+  | { type: 'file'; file: { file_data: string; filename: string } }
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant'
-  content: string
+  content: string | LLMContentBlock[]
 }
 
-// Streams text deltas from LiteLLM's /chat/completions SSE response.
-export async function* callLLM(messages: LLMMessage[], model: string): AsyncGenerator<string> {
+export interface LLMChunk {
+  type: 'content' | 'reasoning'
+  text: string
+}
+
+// Anthropic's adaptive `output_config.effort` and OpenAI's `reasoning_effort`
+// accept different enums for the same three UI levels (checked live against
+// the proxy — Anthropic 400s on 'minimal'/'instant', OpenAI's is the real
+// GPT-5 Chat Completions enum).
+const EFFORT_PARAM_VALUES: Record<'anthropic' | 'openai', Record<ThinkingEffort, string>> = {
+  anthropic: { instant: 'low', medium: 'medium', high: 'high' },
+  openai: { instant: 'minimal', medium: 'medium', high: 'high' },
+}
+
+// Builds the extra body params for a thinking request. `thinking` is the
+// raw effort value from the client; ignored if the model doesn't support
+// thinking or the value isn't a recognized effort level.
+function buildThinkingParams(model: string, thinking?: string): Record<string, unknown> {
+  const option = MODEL_OPTIONS.find((m) => m.id === model)
+  if (!option?.supportsThinking) return {}
+  if (thinking !== 'instant' && thinking !== 'medium' && thinking !== 'high') return {}
+
+  if (option.provider === 'anthropic') {
+    return { thinking: { type: 'adaptive' }, output_config: { effort: EFFORT_PARAM_VALUES.anthropic[thinking] } }
+  }
+  return { reasoning_effort: EFFORT_PARAM_VALUES.openai[thinking] }
+}
+
+// Streams content + reasoning deltas from LiteLLM's /chat/completions SSE response.
+export async function* callLLM(messages: LLMMessage[], model: string, thinking?: string): AsyncGenerator<LLMChunk> {
   const c = useRuntimeConfig()
   let res: Response
   try {
@@ -20,7 +56,7 @@ export async function* callLLM(messages: LLMMessage[], model: string): AsyncGene
         'content-type': 'application/json',
         authorization: `Bearer ${c.litellmApiKey}`,
       },
-      body: JSON.stringify({ model, messages, stream: true }),
+      body: JSON.stringify({ model, messages, stream: true, ...buildThinkingParams(model, thinking) }),
     })
   } catch (err: any) {
     throw createError({
@@ -51,8 +87,9 @@ export async function* callLLM(messages: LLMMessage[], model: string): AsyncGene
       if (data === '[DONE]') return
       try {
         const json = JSON.parse(data)
-        const delta = json.choices?.[0]?.delta?.content
-        if (delta) yield delta as string
+        const delta = json.choices?.[0]?.delta
+        if (delta?.reasoning_content) yield { type: 'reasoning', text: delta.reasoning_content as string }
+        if (delta?.content) yield { type: 'content', text: delta.content as string }
       } catch {
         // keepalive / partial frame — ignore
       }

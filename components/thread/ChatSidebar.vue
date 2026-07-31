@@ -3,18 +3,35 @@ import type { TreeNode } from '~/composables/useConversation'
 import type { Segment } from '~/composables/useSegments'
 import { segmentize } from '~/composables/useSegments'
 
+interface DraftFork { key: string; forkFromNodeId: string; createdAt: string }
 const props = defineProps<{
   nodes: TreeNode[]
   selectedId: string | null
   /** True when the user cleared selection to start a fresh root chat */
   drafting: boolean
+  /** Forks started but not yet sent — persisted, returnable, deletable entries. */
+  draftForks?: DraftFork[]
+  /** Key of the draft fork currently open (highlights it, suppresses chat highlight). */
+  activeDraftKey?: string | null
   /** True under the selective-sharing study condition — shows each chat's visibility tag */
   showVisibility?: boolean
 }>()
 const emit = defineEmits<{
   (e: 'select', tipId: string): void
+  (e: 'select-draft', key: string): void
+  (e: 'delete-draft', key: string): void
   (e: 'new'): void
 }>()
+
+// Draft fork label: "Fork of “<origin turn snippet>”" so multiple drafts are
+// distinguishable; falls back if the origin turn is no longer loaded.
+function draftTitle(d: DraftFork) {
+  const node = props.nodes.find((n) => n.id === d.forkFromNodeId)
+  if (!node) return 'Forked chat'
+  const clean = node.content.replace(/\s+/g, ' ').trim()
+  const snip = clean.length > 34 ? clean.slice(0, 33) + '…' : clean
+  return snip ? `Fork of “${snip}”` : 'Forked chat'
+}
 
 const summaries = useNodeSummaries()
 
@@ -27,7 +44,7 @@ const chats = computed(() => {
 })
 
 const activeChatId = computed(() => {
-  if (props.drafting || !props.selectedId) return null
+  if (props.drafting || props.activeDraftKey || !props.selectedId) return null
   const segs = segmentize(props.nodes)
   const byId = new Map(segs.map((s) => [s.id, s]))
   let cur = segs.find((s) => s.nodes.some((n) => n.id === props.selectedId))
@@ -81,10 +98,12 @@ function onelineTime(iso: string) {
 
 <template>
   <div class="chatside">
-    <button type="button" class="newchat" @click="emit('new')">
-      <span class="plus">+</span>
-      New chat
-    </button>
+    <div class="chathead">
+      <p class="chattitle">Chat History</p>
+      <UiIconButton variant="ghost" :size="30" title="New chat" @click="emit('new')">
+        <AppIcon name="compose" :size="17" />
+      </UiIconButton>
+    </div>
 
     <ul class="chatlist">
       <li v-if="drafting" class="chatitem drafting active">
@@ -92,23 +111,38 @@ function onelineTime(iso: string) {
         <span class="ctime">draft</span>
       </li>
       <li
+        v-for="d in (draftForks ?? [])"
+        :key="d.key"
+        class="chatitem draftfork"
+        :class="{ active: d.key === activeDraftKey }"
+        @click="emit('select-draft', d.key)"
+      >
+        <span class="ctitle">{{ draftTitle(d) }}</span>
+        <div class="cmeta">
+          <span class="ctime">draft</span>
+          <UiBadge variant="neutral" class="forkedtag">Forked</UiBadge>
+          <button class="draftdel" title="Delete forked draft" @click.stop="emit('delete-draft', d.key)">×</button>
+        </div>
+      </li>
+      <li
         v-for="c in chats"
         :key="c.id"
         class="chatitem"
-        :class="{ active: !drafting && c.id === activeChatId, forked: c.head.is_fork_point }"
+        :class="{ active: !drafting && !activeDraftKey && c.id === activeChatId, forked: c.head.is_fork_point }"
         @click="emit('select', c.tip.id)"
       >
         <span class="ctitle">{{ titleOf(c) }}</span>
         <div class="cmeta">
           <span class="ctime">{{ onelineTime(c.tip.created_at) }}</span>
-          <span
+          <UiBadge v-if="c.head.is_fork_point" variant="neutral" class="forkedtag">Forked</UiBadge>
+          <UiBadge
             v-if="showVisibility"
+            :variant="isPublic(c) ? 'accent' : 'warning'"
             class="vistag"
-            :class="isPublic(c) ? 'public' : 'private'"
             :title="isPublic(c) ? 'Visible to your whole team' : 'Private to you'"
           >
             {{ isPublic(c) ? 'Public' : 'Private' }}
-          </span>
+          </UiBadge>
         </div>
       </li>
       <li v-if="!chats.length && !drafting" class="empty">No chats yet</li>
@@ -128,25 +162,21 @@ function onelineTime(iso: string) {
   background: var(--paper);
   min-height: 0;
 }
-.newchat {
+.chathead {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
-  width: 100%;
-  padding: 9px 10px;
-  border: 1px dashed var(--accent);
-  border-radius: 9px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s ease, border-style 0.15s ease;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 2px 2px 4px;
 }
-.newchat:hover { background: var(--accent); color: #fff; border-style: solid; }
-.plus { font-size: 15px; line-height: 1; }
+.chattitle {
+  margin: 0;
+  font-family: 'Fraunces', serif;
+  font-weight: 600;
+  font-size: 16px;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
 
 .chatlist {
   list-style: none;
@@ -169,16 +199,26 @@ function onelineTime(iso: string) {
   transition: background 0.12s ease;
 }
 .chatitem:hover { background: var(--accent-soft); }
-.chatitem.active {
-  background: var(--accent-soft);
-  box-shadow: inset 2px 0 0 var(--accent);
-}
+.chatitem.active { background: var(--accent-soft); }
+.chatitem.active .ctitle { color: var(--accent); font-weight: 700; }
+.chatitem.active .ctime { color: var(--accent); }
 .chatitem.drafting { cursor: default; border: 1px dashed var(--line); }
-.chatitem.forked .ctitle::before {
-  content: '⑂ ';
+/* Draft forks are clickable (returnable) drafts, unlike the New-chat placeholder. */
+.chatitem.draftfork { cursor: pointer; border: 1px dashed var(--line); }
+.chatitem.draftfork.active { background: var(--accent-soft); border-color: var(--accent); }
+.chatitem.draftfork.active .ctitle { color: var(--accent); font-weight: 700; }
+.draftdel {
+  flex: none;
+  border: 0;
+  background: none;
   color: var(--muted);
-  font-weight: 500;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 3px;
+  border-radius: 4px;
 }
+.draftdel:hover { color: #c0392b; background: var(--line); }
 .ctitle {
   font-size: 12.5px;
   font-weight: 500;
@@ -190,25 +230,8 @@ function onelineTime(iso: string) {
   overflow: hidden;
 }
 .cmeta { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.ctime { font-size: 10.5px; color: var(--muted); }
-.vistag {
-  flex: none;
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  line-height: 1.5;
-}
-.vistag.private {
-  background: #f2e9dd;
-  color: #8a6d3b;
-}
-.vistag.public {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
+.ctime { font-size: 10.5px; color: var(--muted); flex: 1; }
+.forkedtag, .vistag { flex: none; font-size: 9.5px; text-transform: uppercase; }
 .empty {
   padding: 16px 8px;
   text-align: center;
