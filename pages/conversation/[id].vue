@@ -230,6 +230,16 @@ const forkOriginLabel = computed(() => {
   return `C${idx}-${turnNumberOf(origin, originId)}`
 })
 
+// Per-message turn number (1-based position within its own segment) — same
+// numbering the canvas cards use, so a turn reads as the same number whether
+// you're looking at the thread or the card it belongs to.
+const turnNumberByNode = computed(() => {
+  const segs = segmentize(nodes.value)
+  const m = new Map<string, number>()
+  for (const s of segs) s.nodes.forEach((n, i) => m.set(n.id, i + 1))
+  return m
+})
+
 onMounted(async () => {
   try {
     const saved = Number(localStorage.getItem(SPLIT_KEY))
@@ -439,9 +449,12 @@ async function onToggleVisibility(segmentNodes: TreeNode[]) {
   // Patch local state immediately — don't wait for the realtime round trip
   // (which teammates never even get for shared→private, since RLS filters it).
   for (const n of own) conv.upsert({ ...n, visibility: to })
-  // Teammates never receive the shared→private UPDATE (RLS filters realtime
-  // events against the new row), so tell them to drop the retracted nodes.
+  // Teammates don't reliably receive this UPDATE over postgres_changes either
+  // way — not for shared→private (RLS filters against the new row) nor for
+  // private→shared (they weren't authorized to see the old row, so Realtime
+  // doesn't consistently deliver the reveal) — so broadcast it explicitly.
   if (to === 'private') rt.broadcastRetract(ids)
+  else rt.broadcastReveal(ids)
 }
 
 // Own nodes on the root→selected path — what the "Share/Unshare branch"
@@ -475,6 +488,11 @@ async function confirmShare() {
   if (error) return
   // Patch local state immediately — don't wait for the realtime round trip.
   for (const n of own) conv.upsert({ ...n, visibility: 'shared' })
+  // Teammates weren't authorized to see these rows before this update, and
+  // Realtime's postgres_changes doesn't reliably deliver an UPDATE that newly
+  // reveals a row to someone who couldn't select it beforehand — broadcast it
+  // explicitly instead of waiting on an event that may never arrive for them.
+  rt.broadcastReveal(ids)
 }
 
 async function unshareBranch() {
@@ -635,6 +653,7 @@ async function signOut() {
         />
         <ThreadPanel
           :messages="messages"
+          :turn-numbers="turnNumberByNode"
           :fork-point-id="forkOriginNodeId"
           :member-names="memberNames"
           :current-user-id="currentUserId"

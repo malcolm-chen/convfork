@@ -68,6 +68,31 @@ export function segmentize<T extends SegmentNodeLike>(nodes: T[]): Segment<T>[] 
 }
 
 /**
+ * Keep only segments that have actually been shared with the team (at least
+ * one shared node) — a segment that's still entirely private draft work
+ * (e.g. a just-forked branch, before its author shares it) stays out of any
+ * shared-facing tree view. Descendants of a hidden segment re-parent to the
+ * nearest ancestor segment that IS visible, rather than being orphaned or
+ * dropped themselves.
+ */
+export function sharedSegments<T extends SegmentNodeLike & { visibility: string }>(
+  all: Segment<T>[],
+): Segment<T>[] {
+  const byId = new Map(all.map((s) => [s.id, s]))
+  const isPublic = (s: Segment<T>) => s.nodes.some((n) => n.visibility === 'shared')
+  const visibleIds = new Set(all.filter(isPublic).map((s) => s.id))
+  function nearestVisibleAncestor(s: Segment<T>): string | null {
+    let cur = s.parentId ? byId.get(s.parentId) : undefined
+    while (cur) {
+      if (visibleIds.has(cur.id)) return cur.id
+      cur = cur.parentId ? byId.get(cur.parentId) : undefined
+    }
+    return null
+  }
+  return all.filter(isPublic).map((s) => ({ ...s, parentId: nearestVisibleAncestor(s) }))
+}
+
+/**
  * Sequential "C" numbering for the canvas badges (C1, C2, …) and the
  * "Forked from C1-2" breadcrumb — ordered by when each segment was *first
  * shared*, not when it was created. A segment with no shared node at all

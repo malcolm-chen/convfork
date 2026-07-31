@@ -5,6 +5,7 @@ import { MODEL_OPTIONS } from '~/shared/models'
 
 const props = defineProps<{
   messages: TreeNode[] // linear path from root → selected node
+  turnNumbers?: Map<string, number> // node id → 1-based position within its own segment (matches the canvas cards)
   forkPointId?: string | null // when set, messages up to here are prior history
   memberNames?: Record<string, string>
   currentUserId?: string
@@ -19,6 +20,9 @@ const props = defineProps<{
 
 function attachmentsOf(m: TreeNode): Attachment[] {
   return props.attachmentsByNode?.get(m.id) ?? []
+}
+function turnNumberOf(m: TreeNode): number | null {
+  return props.turnNumbers?.get(m.id) ?? null
 }
 
 // Short display label for a model id (e.g. "gpt-5.5" → "GPT-5.5"), shown as a
@@ -61,7 +65,10 @@ watch(
         <div v-if="m.role === 'assistant'" class="turn assistant prior">
           <span class="aiavatar">AI</span>
           <div class="turnbody">
-            <div v-if="modelLabel(m.model)" class="meta">{{ modelLabel(m.model) }}</div>
+            <div v-if="modelLabel(m.model) || turnNumberOf(m)" class="meta">
+              <span v-if="turnNumberOf(m)" class="turnnum">#{{ turnNumberOf(m) }}</span>
+              <template v-if="modelLabel(m.model)">{{ modelLabel(m.model) }}</template>
+            </div>
             <ThinkingBlock v-if="m.reasoning" :reasoning="m.reasoning" />
             <ClientOnly>
               <div class="body md" v-html="renderMarkdown(m.content)" />
@@ -74,7 +81,10 @@ watch(
         <div v-else class="msg user prior">
           <UiAvatar class="mavatar" :name="authorName(m)" :color-key="m.author_id" :size="28" />
           <div class="bubble">
-            <div class="meta">{{ authorName(m) }}</div>
+            <div class="meta">
+              <span v-if="turnNumberOf(m)" class="turnnum">#{{ turnNumberOf(m) }}</span>
+              {{ authorName(m) }}
+            </div>
             <AttachmentList :attachments="attachmentsOf(m)" />
             <div v-if="m.content" class="body">{{ m.content }}</div>
             <div class="time">{{ turnTime(m) }}</div>
@@ -91,7 +101,10 @@ watch(
       <div v-if="m.role === 'assistant'" class="turn assistant">
         <span class="aiavatar">AI</span>
         <div class="turnbody">
-          <div v-if="modelLabel(m.model)" class="meta">{{ modelLabel(m.model) }}</div>
+          <div v-if="modelLabel(m.model) || turnNumberOf(m)" class="meta">
+            <span v-if="turnNumberOf(m)" class="turnnum">#{{ turnNumberOf(m) }}</span>
+            <template v-if="modelLabel(m.model)">{{ modelLabel(m.model) }}</template>
+          </div>
           <ThinkingBlock v-if="m.reasoning" :reasoning="m.reasoning" />
           <ClientOnly>
             <div class="body md" v-html="renderMarkdown(m.content)" />
@@ -103,7 +116,10 @@ watch(
       <div v-else class="msg user">
         <UiAvatar class="mavatar" :name="authorName(m)" :color-key="m.author_id" :size="28" />
         <div class="bubble">
-          <div class="meta">{{ authorName(m) }}</div>
+          <div class="meta">
+            <span v-if="turnNumberOf(m)" class="turnnum">#{{ turnNumberOf(m) }}</span>
+            {{ authorName(m) }}
+          </div>
           <AttachmentList :attachments="attachmentsOf(m)" />
           <div v-if="m.content" class="body">{{ m.content }}</div>
           <div class="time">{{ turnTime(m) }}</div>
@@ -188,6 +204,7 @@ watch(
 .msg.prior.user .bubble { background: #6f86d8; }
 
 .meta { font-size: 10px; opacity: 0.7; margin-bottom: 4px; }
+.turnnum { font-weight: 700; margin-right: 5px; opacity: 0.85; }
 .body { white-space: pre-wrap; font-size: 13.5px; line-height: 1.5; overflow-wrap: break-word; }
 .time { margin-top: 4px; text-align: right; font-size: 10px; font-variant-numeric: tabular-nums; }
 .bubble .time { color: rgba(255, 255, 255, 0.75); }

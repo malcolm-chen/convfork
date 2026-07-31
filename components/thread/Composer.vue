@@ -169,12 +169,14 @@ textarea {
   color: var(--ink);
   outline: none;
 }
-.foot { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+.foot { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; row-gap: 8px; margin-top: 6px; }
 .ctx { margin: 0; font-size: 11px; color: var(--muted); }
-.footright { display: flex; align-items: center; gap: 8px; }
-.modelwrap { position: relative; display: inline-flex; align-items: center; }
+.footright { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; min-width: 0; }
+.modelwrap { position: relative; display: inline-flex; align-items: center; min-width: 0; max-width: 100%; }
 .modelselect {
   appearance: none;
+  min-width: 0;
+  max-width: 100%;
   padding: 6px 26px 6px 12px;
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -183,6 +185,9 @@ textarea {
   font: inherit;
   font-size: 12.5px;
   cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .modelselect:disabled { opacity: 0.55; cursor: default; }
 .modelcaret { position: absolute; right: 9px; pointer-events: none; color: var(--muted); }

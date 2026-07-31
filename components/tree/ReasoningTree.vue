@@ -3,7 +3,7 @@ import { VueFlow, useVueFlow, useNodesInitialized } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import dagre from 'dagre'
 import NodeCard from '~/components/tree/TreeNode.vue'
-import { segmentize, sharedOrder, type Segment } from '~/composables/useSegments'
+import { segmentize, sharedOrder, sharedSegments, type Segment } from '~/composables/useSegments'
 import type { TreeNode, Reaction } from '~/composables/useConversation'
 
 const props = defineProps<{
@@ -33,21 +33,7 @@ const allSegments = computed(() => segmentize(props.nodes))
 // shared view entirely (still reachable via Chat History). A private segment
 // in the middle of a chain is skipped rather than orphaning its descendants:
 // they re-parent to the nearest ancestor segment that IS visible.
-const segments = computed(() => {
-  const all = allSegments.value
-  const byId = new Map(all.map((s) => [s.id, s]))
-  const isPublic = (s: Segment<TreeNode>) => s.nodes.some((n) => n.visibility === 'shared')
-  const visibleIds = new Set(all.filter(isPublic).map((s) => s.id))
-  function nearestVisibleAncestor(s: Segment<TreeNode>): string | null {
-    let cur = s.parentId ? byId.get(s.parentId) : undefined
-    while (cur) {
-      if (visibleIds.has(cur.id)) return cur.id
-      cur = cur.parentId ? byId.get(cur.parentId) : undefined
-    }
-    return null
-  }
-  return all.filter(isPublic).map((s) => ({ ...s, parentId: nearestVisibleAncestor(s) }))
-})
+const segments = computed(() => sharedSegments(allSegments.value))
 const segmentsById = computed(() => new Map(segments.value.map((s) => [s.id, s])))
 // C1/C2/… badges, numbered by when each segment was first shared (not created).
 const sharedIndexById = computed(() => sharedOrder(segments.value))

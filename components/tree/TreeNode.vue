@@ -37,9 +37,17 @@ const visTitle = computed(() =>
 )
 
 // Reactions anyone left anywhere on the trajectory; new ones attach to the
-// HEAD node — its id is stable for the segment's lifetime.
+// segment's earliest SHARED node rather than the head, because the head can
+// itself still be private (a segment renders as soon as ANY node in it is
+// shared — see useSegments' isPublic check) — teammates who aren't its author
+// never load a private node into their local tree, so a reaction attached to
+// it would silently vanish from everyone else's view of the card. A fully
+// shared segment (the common case) still resolves to the head, same as before.
 const segReactions = computed(() =>
   props.segment.nodes.flatMap((n) => props.reactionsByNode.get(n.id) ?? []),
+)
+const reactionTargetId = computed(
+  () => props.segment.nodes.find((n) => n.visibility === 'shared')?.id ?? props.segment.head.id,
 )
 
 // ── Auto-summary (ChatGPT-sidebar style) instead of raw turns ──
@@ -51,7 +59,13 @@ const transcript = computed(() =>
 )
 const sumKey = computed(() => summaries.keyFor(transcript.value))
 const entry = computed(() => summaries.get(sumKey.value))
-watch(transcript, (t) => summaries.request(t), { immediate: true })
+// Whichever backbone this trajectory's most recent turn actually used — keeps
+// the summary call on a provider the team has configured, instead of always
+// reaching for a fixed default backbone regardless of what's selected.
+const summaryModel = computed(
+  () => [...props.segment.nodes].reverse().find((n) => n.model)?.model ?? null,
+)
+watch(transcript, (t) => summaries.request(t, summaryModel.value), { immediate: true })
 
 const title = computed(() => {
   const e = entry.value
@@ -134,12 +148,14 @@ function onDotDown(n: TreeNode, ev: PointerEvent) {
     <Handle type="target" :position="Position.Left" class="cardhandle" />
 
     <div class="hdr">
+      <span class="tnum hdrnum">1</span>
       <div class="titlewrap" :class="{ forkable: canFork(starter) }" @click.stop="tryFork(starter)">
-        <p class="ctitle" :class="{ ph: !title }" :title="title || fallback">
+        <p class="ctitle" :class="{ ph: !title }">
           <template v-if="title">{{ title }}</template>
           <span v-else-if="loading" class="shimmer">Summarizing…</span>
           <template v-else>{{ fallback }}</template>
         </p>
+        <div class="turntip nodrag nowheel" role="tooltip">{{ starter.content }}</div>
       </div>
       <UiBadge v-if="shortTag" class="idtag">{{ shortTag }}</UiBadge>
       <span v-if="showVisibility !== false" class="lockicon" :title="visTitle">
@@ -154,7 +170,6 @@ function onDotDown(n: TreeNode, ev: PointerEvent) {
         v-for="n in restNodes"
         :key="n.id"
         :class="{ forkable: canFork(n) }"
-        :title="oneline(n.content, 200)"
         @click.stop="tryFork(n)"
       >
         <!-- Who said it: the agent, or the teammate who wrote the turn. -->
@@ -168,6 +183,7 @@ function onDotDown(n: TreeNode, ev: PointerEvent) {
         />
         <span class="tnum">{{ turnNumberOf(segment, n.id) }}</span>
         <span class="tsnippet">{{ oneline(n.content, 44) }}</span>
+        <div class="turntip nodrag nowheel" role="tooltip">{{ n.content }}</div>
         <!-- Source anchor co-located with this turn's dot. -->
         <Handle :id="n.id" type="source" :position="Position.Right" :style="turnHandleStyle" />
         <span class="tdot nodrag" title="Fork from here" @pointerdown="onDotDown(n, $event)" @click.stop />
@@ -179,7 +195,7 @@ function onDotDown(n: TreeNode, ev: PointerEvent) {
         :reactions="segReactions"
         :current-user-id="currentUserId"
         :member-names="memberNames"
-        @react="(t) => emit('react', { nodeId: segment.id, type: t })"
+        @react="(t) => emit('react', { nodeId: reactionTargetId, type: t })"
         @unreact="(p) => emit('unreact', p)"
       />
     </div>
@@ -214,13 +230,17 @@ function onDotDown(n: TreeNode, ev: PointerEvent) {
 .tnode.sel { box-shadow: 0 0 0 2px var(--accent); border-color: var(--accent); }
 
 .hdr { position: relative; display: flex; align-items: flex-start; gap: 8px; margin-bottom: 8px; }
-.idtag, .lockicon { margin-top: 2px; }
+.idtag, .lockicon, .hdrnum { margin-top: 2px; }
+/* Base .tnum is sized for the small turnlist rows below; the header's title
+   is bigger, so nudge this one down onto the same baseline as the text. */
+.hdrnum { margin-top: 5px; }
 .lockicon { flex: none; display: flex; color: var(--muted); }
 .idtag { flex: none; }
 
 /* LLM-summarized headline is the card's one title — also "turn 0": click to
    fork from the opener, same as any other row below. */
 .titlewrap {
+  position: relative; /* anchors .turntip — the full-message hover popover */
   flex: 1;
   min-width: 0;
   margin: -2px -4px;
@@ -247,6 +267,38 @@ function onDotDown(n: TreeNode, ev: PointerEvent) {
   animation: pulse 1.2s ease-in-out infinite;
 }
 @keyframes pulse { 50% { opacity: 0.45; } }
+
+/* Full-message hover popover — both the header (turn 1) and every numbered
+   row below are truncated for the card's compact layout, so hovering either
+   reveals the whole thing instead of relying on a plain browser tooltip. */
+.turntip {
+  display: none;
+  position: absolute;
+  z-index: 50;
+  top: 50%;
+  left: calc(100% + 10px);
+  transform: translateY(-50%);
+  width: 260px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  box-shadow: 0 10px 28px rgba(20, 20, 30, 0.18);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.55;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: auto;
+}
+.titlewrap:hover .turntip,
+.turnlist li:hover .turntip {
+  display: block;
+}
 
 /* No more single dot for the whole card — geometry only, not shown. */
 .cardhandle { opacity: 0; pointer-events: none; }

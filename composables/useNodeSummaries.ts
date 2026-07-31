@@ -56,8 +56,11 @@ export function useNodeSummaries() {
   const keyFor = (transcript: string) => hash(transcript)
 
   // Kick off a summary for this transcript if we don't already have one
-  // (or one in flight). Idempotent — safe to call on every render.
-  function request(transcript: string) {
+  // (or one in flight). Idempotent — safe to call on every render. `model`
+  // should be whichever backbone the trajectory itself already used, so the
+  // summary call stays on a provider the team actually has configured
+  // instead of silently defaulting to a fixed backbone.
+  function request(transcript: string, model?: string | null) {
     if (!import.meta.client) return
     const key = keyFor(transcript)
     const cur = cache.get(key)
@@ -65,12 +68,12 @@ export function useNodeSummaries() {
     // Light client-side throttle so opening a big tree doesn't fan out dozens
     // of calls at once; requeue shortly if we're saturated.
     if (inflight >= 4) {
-      setTimeout(() => request(transcript), 250)
+      setTimeout(() => request(transcript, model), 250)
       return
     }
     cache.set(key, { text: '', status: 'loading' })
     inflight++
-    $fetch<{ summary: string }>('/api/summarize', { method: 'POST', body: { text: transcript.slice(0, 6000) } })
+    $fetch<{ summary: string }>('/api/summarize', { method: 'POST', body: { text: transcript.slice(0, 6000), model } })
       .then((r) => {
         cache.set(key, { text: r.summary, status: 'done' })
         persist()

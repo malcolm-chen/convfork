@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { segmentize } from '~/composables/useSegments'
+import { segmentize, sharedSegments } from '~/composables/useSegments'
 
 // Small SVG rendering of a conversation's branch structure for the dashboard
 // cards. One dot = one trajectory (linear runs of turns collapse into a single
@@ -10,6 +10,7 @@ interface MiniNode {
   parent_id: string | null
   is_fork_point?: boolean
   created_at?: string
+  visibility: string
 }
 
 const props = defineProps<{ nodes: MiniNode[] }>()
@@ -21,8 +22,10 @@ const PAD = 12
 interface Dot { id: string; x: number; y: number; r: number; cls: string }
 
 const layout = computed(() => {
-  // Collapse trajectories, then lay out the segment graph as pseudo-nodes.
-  const nodes = segmentize(props.nodes)
+  // Collapse trajectories, then keep only what's actually been shared with the
+  // team — a private draft fork (not yet shared by its author) stays out of
+  // this preview, same as the main canvas.
+  const nodes = sharedSegments(segmentize(props.nodes))
     .map((s) => ({
       id: s.id,
       parent_id: s.parentId,

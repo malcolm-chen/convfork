@@ -75,6 +75,20 @@ export function useRealtime(
         )
         if (ids.length) conv.removeNodes(ids)
       })
+      // The reverse direction has the same problem, just the other way round:
+      // a teammate wasn't authorized to see this row before the update, and
+      // Realtime's per-subscriber RLS check for postgres_changes doesn't
+      // reliably deliver an UPDATE that newly reveals a row to someone who
+      // couldn't select it beforehand (same root cause as the retract case
+      // above, mirrored) — so the author also broadcasts which ids just
+      // became shared, and everyone else pulls them in via a normal
+      // (RLS-authorized, now-succeeding) fetch instead of waiting on an
+      // UPDATE event that may never arrive.
+      .on('broadcast', { event: 'reveal' }, (p) => {
+        const ids = (p.payload?.ids ?? []) as string[]
+        if (!ids.length) return
+        Promise.all(ids.map((id) => conv.fetchLineage(id))).then(() => conv.loadReactions())
+      })
       // A member cleared the whole tree server-side. DELETEs don't reach us
       // over postgres_changes (only INSERT/UPDATE are subscribed, and RLS
       // filters others' private rows anyway), so reconcile from the server:
@@ -93,6 +107,11 @@ export function useRealtime(
     channel?.send({ type: 'broadcast', event: 'retract', payload: { ids } })
   }
 
+  // Author-side announcement for private→shared flips (see broadcast handler).
+  function broadcastReveal(ids: string[]) {
+    channel?.send({ type: 'broadcast', event: 'reveal', payload: { ids } })
+  }
+
   // Initiator-side announcement that the tree was cleared server-side.
   function broadcastCleared() {
     channel?.send({ type: 'broadcast', event: 'cleared', payload: {} })
@@ -105,5 +124,5 @@ export function useRealtime(
     }
   }
 
-  return { start, stop, broadcastRetract, broadcastCleared }
+  return { start, stop, broadcastRetract, broadcastReveal, broadcastCleared }
 }

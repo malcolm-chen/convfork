@@ -58,6 +58,7 @@ interface DashNode {
   is_fork_point: boolean
   content: string
   created_at: string
+  visibility: string
 }
 const { data: allNodes, refresh: refreshNodes } = await useAsyncData('dashNodes', async () => {
   if (!profile.value?.team_id) return [] as DashNode[]
@@ -65,7 +66,7 @@ const { data: allNodes, refresh: refreshNodes } = await useAsyncData('dashNodes'
   // and silently drop all new activity once a team passes the limit.
   const { data } = await supabase
     .from('nodes')
-    .select('id, conversation_id, parent_id, author_id, is_fork_point, content, created_at')
+    .select('id, conversation_id, parent_id, author_id, is_fork_point, content, created_at, visibility')
     .order('created_at', { ascending: false })
     .limit(4000)
   return (data ?? []) as DashNode[]

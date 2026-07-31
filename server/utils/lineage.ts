@@ -16,7 +16,15 @@ interface AttachmentRow {
 async function attachmentBlocks(atts: AttachmentRow[]): Promise<LLMContentBlock[]> {
   const blocks: LLMContentBlock[] = []
   for (const a of atts) {
-    const bytes = await getUpload(a.s3_key)
+    let bytes: Buffer
+    try {
+      bytes = await getUpload(a.s3_key)
+    } catch (err: any) {
+      throw createError({
+        statusCode: 502,
+        statusMessage: `could not fetch attachment "${a.filename}" from storage: ${err?.message || 'unknown S3 error'}`,
+      })
+    }
     const dataUrl = `data:${a.content_type};base64,${bytes.toString('base64')}`
     blocks.push(
       a.kind === 'image'
