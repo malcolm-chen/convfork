@@ -1,0 +1,222 @@
+"""Export one study session's data (design doc §7 "research export") as a zip.
+
+A "session ID" here is the study/team code from `teams.session_id` (assigned
+in /admin, shared by every participant on that team — see
+supabase/migrations/0011_study_session_credentials.sql). This is distinct
+from the per-browser-tab `session_id` used inside individual log rows
+(composables/useActionLogger.ts's `cf_sid`), which is just a sub-partition
+under the team in S3 and not something you address directly.
+
+For the given session ID this script:
+  1. Resolves it to a team via Supabase (`teams.session_id`).
+  2. Lists that team's participants (`users` where `team_id = ...`).
+  3. Pulls every behavior-log NDJSON object from S3 under `logs/{team_id}/`
+     (server/utils/s3.ts / server/api/logs.post.ts write logs there — each
+     row already has ts / action_type / action_content / conversation_id /
+     node_id, see composables/useActionLogger.ts), grouping rows by the
+     participant they belong to.
+  4. Writes one JSON array per participant plus a metadata.json, and zips
+     the result.
+
+    uv run python scripts/export_session.py <SESSION_ID> [--out DIR]
+
+Requires SUPABASE_URL + SUPABASE_SECRET_KEY, and AWS_REGION / AWS_ACCESS_KEY_ID
+/ AWS_SECRET_ACCESS_KEY / S3_BUCKET, all in .env (same vars server/ uses).
+Read-only: never writes to Supabase or S3.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+
+import boto3
+from dotenv import load_dotenv
+from supabase import Client, create_client
+
+ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT / ".env")
+
+SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9._-]{6,64}$")
+
+
+def supabase_client() -> Client:
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SECRET_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+    if not url or not key:
+        sys.exit("Set SUPABASE_URL and SUPABASE_SECRET_KEY in .env first.")
+    return create_client(url, key)
+
+
+def s3_client():
+    region = os.environ.get("AWS_REGION")
+    key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+    secret = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    if not key_id or not secret:
+        sys.exit("Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in .env first.")
+    return boto3.client("s3", region_name=region, aws_access_key_id=key_id, aws_secret_access_key=secret)
+
+
+def bucket_name() -> str:
+    bucket = os.environ.get("S3_BUCKET")
+    if not bucket:
+        sys.exit("Set S3_BUCKET in .env first.")
+    return bucket
+
+
+def slugify(value: str) -> str:
+    v = re.sub(r"[^a-zA-Z0-9._-]+", "_", value.strip())
+    return v.strip("_") or "participant"
+
+
+def fetch_team(sb: Client, session_id: str) -> dict:
+    res = (
+        sb.table("teams")
+        .select("id, name, session_id, sharing_condition, created_at")
+        .eq("session_id", session_id)
+        .execute()
+    )
+    if not res.data:
+        sys.exit(f"No team found with session_id {session_id!r}.")
+    return res.data[0]
+
+
+def fetch_participants(sb: Client, team_id: str) -> list[dict]:
+    res = (
+        sb.table("users")
+        .select("id, study_user_id, display_name, role, created_at")
+        .eq("team_id", team_id)
+        .execute()
+    )
+    return res.data or []
+
+
+def fetch_logs(s3, bucket: str, team_id: str) -> dict[str, list[dict]]:
+    """Returns {user_id: [action_row, ...]} pulled from every NDJSON object
+    under logs/{team_id}/ (all participants, all browser sub-sessions)."""
+    rows_by_user: dict[str, list[dict]] = {}
+    prefix = f"logs/{team_id}/"
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            parts = key[len(prefix) :].split("/")
+            if len(parts) < 2:
+                continue  # not a per-user log object, skip
+            user_id = parts[0]
+            body = s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
+            for line in body.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    print(f"  ! skipping malformed line in {key}", file=sys.stderr)
+                    continue
+                rows_by_user.setdefault(user_id, []).append(row)
+    return rows_by_user
+
+
+def build_export(session_id: str, out_dir: Path) -> Path:
+    sb = supabase_client()
+    s3 = s3_client()
+    bucket = bucket_name()
+
+    print(f"Resolving session {session_id!r}...")
+    team = fetch_team(sb, session_id)
+    team_id = team["id"]
+
+    print(f"Team: {team['name']} ({team_id})")
+    participants = fetch_participants(sb, team_id)
+    print(f"Participants: {len(participants)}")
+
+    print(f"Listing logs under s3://{bucket}/logs/{team_id}/ ...")
+    rows_by_user = fetch_logs(s3, bucket, team_id)
+
+    known_ids = {p["id"] for p in participants}
+    unknown_ids = sorted(set(rows_by_user) - known_ids)
+    if unknown_ids:
+        print(f"  ! {len(unknown_ids)} user_id(s) in S3 have no matching users row: {unknown_ids}", file=sys.stderr)
+
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        used_names: set[str] = set()
+        file_index = []
+
+        def write_participant(user_id: str, label: str) -> None:
+            base = slugify(label)
+            name = base
+            n = 2
+            while name in used_names:
+                name = f"{base}_{n}"
+                n += 1
+            used_names.add(name)
+            actions = sorted(rows_by_user.get(user_id, []), key=lambda r: r.get("ts", ""))
+            (tmp_path / f"{name}.json").write_text(json.dumps(actions, indent=2, ensure_ascii=False))
+            file_index.append(
+                {"user_id": user_id, "file": f"{name}.json", "action_count": len(actions)}
+            )
+
+        for p in participants:
+            write_participant(p["id"], p.get("study_user_id") or p.get("display_name") or p["id"])
+        for uid in unknown_ids:
+            write_participant(uid, f"unknown_{uid}")
+
+        metadata = {
+            "session_id": session_id,
+            "team": {
+                "id": team_id,
+                "name": team["name"],
+                "sharing_condition": team.get("sharing_condition"),
+                "created_at": team.get("created_at"),
+            },
+            "participants": [
+                {
+                    "id": p["id"],
+                    "study_user_id": p.get("study_user_id"),
+                    "display_name": p.get("display_name"),
+                    "role": p.get("role"),
+                }
+                for p in participants
+            ],
+            "files": file_index,
+            "total_actions": sum(f["action_count"] for f in file_index),
+            "source": {"s3_bucket": bucket, "s3_prefix": f"logs/{team_id}/"},
+            "exported_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        (tmp_path / "metadata.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = out_dir / f"session-{slugify(session_id)}-{stamp}.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(tmp_path.iterdir()):
+                zf.write(f, arcname=f.name)
+
+    return zip_path
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Export a study session's behavior logs as a zip.")
+    parser.add_argument("session_id", help="Study session code (teams.session_id)")
+    parser.add_argument("--out", default=str(ROOT / "exports"), help="Output directory (default: ./exports)")
+    args = parser.parse_args()
+
+    if not SESSION_ID_RE.match(args.session_id):
+        sys.exit("sessionID must be 6-64 chars (letters, digits, . _ -)")
+
+    zip_path = build_export(args.session_id, Path(args.out))
+    size_kb = zip_path.stat().st_size / 1024
+    print(f"\nDone -> {zip_path} ({size_kb:.1f} KB)")
+
+
+if __name__ == "__main__":
+    main()

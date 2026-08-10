@@ -6,6 +6,7 @@ import { segmentize } from '~/composables/useSegments'
 interface DraftFork { key: string; forkFromNodeId: string; createdAt: string }
 const props = defineProps<{
   nodes: TreeNode[]
+  currentUserId: string
   selectedId: string | null
   /** True when the user cleared selection to start a fresh root chat */
   drafting: boolean
@@ -35,11 +36,14 @@ function draftTitle(d: DraftFork) {
 
 const summaries = useNodeSummaries()
 
-/** Independent chats: root trajectories + explicitly forked branches. */
+/** Independent chats: MY OWN root trajectories + branches I forked. A
+ * teammate's shared work lives on the canvas, not in here — it only becomes
+ * one of "my chats" once I actually fork it (see useSegments: is_fork_point
+ * is set on the forking author's own new node, never the origin's). */
 const chats = computed(() => {
   const segs = segmentize(props.nodes)
   return segs
-    .filter((s) => !s.parentId || s.head.is_fork_point)
+    .filter((s) => s.head.author_id === props.currentUserId && (!s.parentId || s.head.is_fork_point))
     .sort((a, b) => b.tip.created_at.localeCompare(a.tip.created_at))
 })
 
@@ -171,7 +175,7 @@ function onelineTime(iso: string) {
 }
 .chattitle {
   margin: 0;
-  font-family: 'Fraunces', serif;
+  font-family: 'Geist', sans-serif;
   font-weight: 600;
   font-size: 16px;
   letter-spacing: -0.01em;

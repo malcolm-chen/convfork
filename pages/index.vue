@@ -477,7 +477,7 @@ async function signOut() {
 .treemeta { min-width: 0; }
 .treemeta h3 {
   margin: 0;
-  font-family: 'Fraunces', serif;
+  font-family: 'Geist', sans-serif;
   font-weight: 600;
   font-size: 19px;
   letter-spacing: -0.01em;

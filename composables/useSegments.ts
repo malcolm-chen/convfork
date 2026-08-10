@@ -32,10 +32,16 @@ export function segmentize<T extends SegmentNodeLike>(nodes: T[]): Segment<T>[] 
 
   // A node starts a new segment if it has no visible parent (root or the
   // parent is hidden by RLS), it forked a branch, or its parent diverges.
+  // "Diverges" only counts OTHER non-fork children — a fork already gets its
+  // own segment via the is_fork_point rule above, so it must never split its
+  // origin's existing continuation into two cards too. Forking from turn 3
+  // of someone's 5-turn conversation must leave that conversation's card
+  // whole; only the fork's own (separate, private-until-shared) branch is new.
   const isStart = (n: T) => {
     if (!n.parent_id || !byId.has(n.parent_id)) return true
     if (n.is_fork_point) return true
-    return (children.get(n.parent_id)?.length ?? 0) > 1
+    const siblings = children.get(n.parent_id) ?? []
+    return siblings.filter((s) => !s.is_fork_point).length > 1
   }
 
   const segByNode = new Map<string, string>()
@@ -46,9 +52,12 @@ export function segmentize<T extends SegmentNodeLike>(nodes: T[]): Segment<T>[] 
     segByNode.set(start.id, start.id)
     let cur = start
     for (;;) {
-      const kids = children.get(cur.id) ?? []
-      if (kids.length !== 1 || isStart(kids[0]!)) break
-      cur = kids[0]!
+      // Ignore fork-point children here too — they're picked up as their own
+      // segment starts by the outer loop, and must not stop (or fork off)
+      // this segment's own walk through its actual, non-fork continuation.
+      const nonForkKids = (children.get(cur.id) ?? []).filter((k) => !k.is_fork_point)
+      if (nonForkKids.length !== 1 || isStart(nonForkKids[0]!)) break
+      cur = nonForkKids[0]!
       segNodes.push(cur)
       segByNode.set(cur.id, start.id)
     }

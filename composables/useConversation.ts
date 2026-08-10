@@ -14,6 +14,9 @@ export interface TreeNode {
   visibility: 'private' | 'shared'
   is_fork_point: boolean
   model: string | null
+  // Set only on a fresh root node (parent_id null) created by forking a
+  // merged context node — see server/api/chat.post.ts / MergedNodeCard.vue.
+  parent_merged_node_id: string | null
   created_at: string
 }
 

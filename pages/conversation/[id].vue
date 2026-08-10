@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import type { TreeNode } from '~/composables/useConversation'
 import type { AttachmentRef } from '~/composables/useFileUpload'
-import { segmentize, sharedOrder, turnNumberOf } from '~/composables/useSegments'
+import type { ConceptTag } from '~/composables/useConcepts'
+import { segmentize, sharedOrder, sharedSegments, turnNumberOf } from '~/composables/useSegments'
 
 // Without this, navigating between two conversation pages (e.g. forking,
 // which lands you on `/conversation/<new-id>`) reuses this component instance
@@ -48,6 +49,90 @@ const DRAFTS_KEY = `convfork:draftForks:${conversationId}`
 const currentUserId = computed(() => user.value?.id ?? '')
 const messages = computed(() => (drafting.value ? [] : conv.lineageOf(selectedId.value)))
 
+// ── Merge mode: select 2+ conversation nodes (segments) on this project's
+// canvas, generate a merged node over them. See composables/useMergeMode.ts. ──
+const mergeMode = useMergeMode()
+const mergedNodesStore = useMergedNodes(conversationId)
+const conceptsStore = useConcepts(conversationId)
+const showMergeModal = ref(false)
+const canContinueMerge = computed(() => mergeMode.state.selectedIds.size >= 2)
+
+function onToggleMergeSelect(segmentId: string) {
+  mergeMode.toggle(segmentId)
+}
+function openMergeModal() {
+  if (canContinueMerge.value) showMergeModal.value = true
+}
+function cancelMergeModal() {
+  showMergeModal.value = false
+}
+const modalSources = computed(() => {
+  const segs = segmentize(nodes.value)
+  return [...mergeMode.state.selectedIds].map((headId) => {
+    const seg = segs.find((s) => s.id === headId)
+    const starter = seg?.nodes.find((n) => n.role === 'user') ?? seg?.head
+    return {
+      headNodeId: headId,
+      tipNodeId: seg?.tip.id ?? headId,
+      label: snippet(starter?.content ?? '', 60) || 'Untitled',
+      authorId: starter?.author_id ?? '',
+      turnCount: seg?.nodes.length ?? 0,
+    }
+  })
+})
+async function onMergeCreated() {
+  showMergeModal.value = false
+  mergeMode.cancel()
+  await mergedNodesStore.refresh()
+}
+
+// ── Merge-fork draft: a chat seeded from a merged node's inherited context.
+// Like draftForks above, no DB node exists until the first message — but this
+// new segment has no parent at all (parent_id null, a fresh root within this
+// same project) rather than forking from a specific existing turn.
+const activeMergedNodeId = ref<string | null>(null)
+function activateMergeDraft(mergedNodeId: string) {
+  // Same "drafting" state as New chat — there's no existing node to select,
+  // just one composer ready to go — so the thread panel shows "send a
+  // message to continue" instead of the "select a chat from the list" empty
+  // state meant for when nothing at all is active.
+  drafting.value = true
+  selectedId.value = null
+  forkPointId.value = null
+  activeDraftKey.value = null
+  activeMergedNodeId.value = mergedNodeId
+}
+
+// Whichever merged node is driving the inherited-context block right now —
+// the active pre-send draft, or (once the segment's root node is real) that
+// node's own parent_merged_node_id, looked up the same way server-side in
+// server/utils/lineage.ts.
+const effectiveMergedNodeId = computed(
+  () => activeMergedNodeId.value || messages.value[0]?.parent_merged_node_id || null,
+)
+interface InheritedSource {
+  segmentHeadNodeId: string
+  authorId: string
+  label: string
+  messages: { id: string; role: 'user' | 'assistant'; authorName: string; content: string; created_at: string }[]
+}
+const inheritedGroups = ref<InheritedSource[]>([])
+watch(
+  effectiveMergedNodeId,
+  async (id) => {
+    if (!id) {
+      inheritedGroups.value = []
+      return
+    }
+    try {
+      inheritedGroups.value = (await $fetch<{ sources: InheritedSource[] }>(`/api/merge/${id}`)).sources
+    } catch {
+      inheritedGroups.value = []
+    }
+  },
+  { immediate: true },
+)
+
 // ── Resizable chat/tree split (both flex, equal by default) ──
 // splitRatio is the tree panel's share of the chat+tree space; the chat panel
 // always gets the rest, so they're equal width (0.5/0.5) until dragged.
@@ -90,9 +175,12 @@ function onSplitterDown(e: PointerEvent) {
   window.addEventListener('pointercancel', onUp)
 }
 
-function mostRecentChatTip(list: TreeNode[]): string | null {
+// Only MY OWN chats (a root I started, or a branch I forked) — a teammate's
+// shared work shouldn't auto-open in, or default into, someone else's window
+// just because it's visible; it only becomes "my chat" once I fork it.
+function mostRecentChatTip(list: TreeNode[], authorId: string): string | null {
   const chats = segmentize(list)
-    .filter((s) => !s.parentId || s.head.is_fork_point)
+    .filter((s) => s.head.author_id === authorId && (!s.parentId || s.head.is_fork_point))
     .sort((a, b) => b.tip.created_at.localeCompare(a.tip.created_at))
   return chats[0]?.tip.id ?? null
 }
@@ -184,6 +272,50 @@ const contributorAvatars = computed(() => {
   return list
 })
 
+// ── Canvas filter bar: highlight segments/merged nodes by author or topic.
+// Only one filter dimension is active at a time — picking one clears the other. ──
+const filterAuthorId = ref<string | null>(null)
+const filterConceptId = ref<string | null>(null)
+function onFilterAuthorId(id: string | null) {
+  filterAuthorId.value = id
+  if (id) filterConceptId.value = null
+}
+function onFilterConceptId(id: string | null) {
+  filterConceptId.value = id
+  if (id) filterAuthorId.value = null
+}
+// Only concepts actually attached to a currently-rendered segment — not the
+// whole project's historical registry, which could include concepts no
+// longer attached to anything visible (see design plan §13).
+const availableTopics = computed(() => {
+  const seen = new Set<string>()
+  const list: ConceptTag[] = []
+  for (const tags of conceptsStore.bySegment.values()) {
+    for (const t of tags) {
+      if (seen.has(t.id)) continue
+      seen.add(t.id)
+      list.push(t)
+    }
+  }
+  return list
+})
+// Every card on the canvas emits this on mount — collect them into one
+// batch instead of firing a separate request per card, so a cold-open
+// canvas tags everything missing in a single combined LLM call rather than
+// a burst of concurrent per-segment ones.
+let conceptBatch: { segmentHeadNodeId: string; tipNodeId: string }[] = []
+let conceptBatchTimer: ReturnType<typeof setTimeout> | null = null
+function onRequestConcepts(payload: { segmentHeadNodeId: string; tipNodeId: string; model?: string | null }) {
+  conceptBatch.push({ segmentHeadNodeId: payload.segmentHeadNodeId, tipNodeId: payload.tipNodeId })
+  if (conceptBatchTimer) clearTimeout(conceptBatchTimer)
+  conceptBatchTimer = setTimeout(() => {
+    const batch = conceptBatch
+    conceptBatch = []
+    conceptBatchTimer = null
+    conceptsStore.requestMany(batch)
+  }, 200)
+}
+
 function snippet(text: string, len = 44) {
   const clean = text.replace(/\s+/g, ' ').trim()
   return clean.length > len ? clean.slice(0, len - 1) + '…' : clean
@@ -230,16 +362,6 @@ const forkOriginLabel = computed(() => {
   return `C${idx}-${turnNumberOf(origin, originId)}`
 })
 
-// Per-message turn number (1-based position within its own segment) — same
-// numbering the canvas cards use, so a turn reads as the same number whether
-// you're looking at the thread or the card it belongs to.
-const turnNumberByNode = computed(() => {
-  const segs = segmentize(nodes.value)
-  const m = new Map<string, number>()
-  for (const s of segs) s.nodes.forEach((n, i) => m.set(n.id, i + 1))
-  return m
-})
-
 onMounted(async () => {
   try {
     const saved = Number(localStorage.getItem(SPLIT_KEY))
@@ -253,10 +375,12 @@ onMounted(async () => {
 
   await conv.load()
   rt.start()
+  await mergedNodesStore.refresh()
+  await conceptsStore.refresh()
   loadDraftForks()
   pruneDraftForks()
   // ChatGPT-style: open the most recent chat, or start drafting if none exist.
-  const tip = mostRecentChatTip(nodes.value)
+  const tip = mostRecentChatTip(nodes.value, currentUserId.value)
   if (tip) selectedId.value = tip
   else drafting.value = true
 })
@@ -271,6 +395,7 @@ function select(id: string) {
   activeDraftKey.value = null // leaving a draft fork just deselects it; it stays in the list
   if (id !== forkPointId.value) forkPointId.value = null // navigating away ends fork mode
   selectedId.value = id
+  activeMergedNodeId.value = null
 }
 
 function startNewChat() {
@@ -278,6 +403,7 @@ function startNewChat() {
   selectedId.value = null
   forkPointId.value = null
   activeDraftKey.value = null
+  activeMergedNodeId.value = null
   drafting.value = true
 }
 
@@ -288,6 +414,7 @@ async function onSubmit(payload: { text: string; model: string; thinking?: strin
   // branch here instead of leaving it to (unreliable) sibling-count inference.
   const isFork = !!forkPointId.value && parentNodeId === forkPointId.value
   const materializedDraft = activeDraftKey.value
+  const materializedMergeDraft = !parentNodeId ? activeMergedNodeId.value : null
   streamingModel.value = payload.model
   const r = await send({
     conversationId,
@@ -297,6 +424,7 @@ async function onSubmit(payload: { text: string; model: string; thinking?: strin
     thinking: payload.thinking,
     attachments: payload.attachments,
     isFork,
+    mergedNodeId: materializedMergeDraft ?? undefined,
     // Render the user's own turn the instant we know its id, rather than
     // waiting on the full SSE stream + fetchLineage below — otherwise the
     // message the user just sent doesn't appear until the agent starts
@@ -313,6 +441,7 @@ async function onSubmit(payload: { text: string; model: string; thinking?: strin
         visibility: 'private',
         is_fork_point: isFork,
         model: null,
+        parent_merged_node_id: materializedMergeDraft,
         created_at: new Date().toISOString(),
       })
       for (const a of payload.attachments ?? []) {
@@ -328,17 +457,23 @@ async function onSubmit(payload: { text: string; model: string; thinking?: strin
       }
       drafting.value = false
       selectedId.value = userNodeId
+      // The draft fork just became a real branch the instant we know its id —
+      // don't wait on the AI's reply to graduate it out of "draft" in the
+      // sidebar (activeDraftKey gates ChatSidebar's active-row highlighting).
+      if (materializedDraft) removeDraftFork(materializedDraft)
+      refreshConvos() // bump this project to the top of the activity-ordered list
     },
   })
   // Pull the new pair immediately — selecting before the realtime INSERT
   // arrives would otherwise blank the thread panel for a beat. This also
   // overwrites the optimistic user node above with the server-confirmed one.
   await conv.fetchLineage(r.assistantNodeId)
-  // The draft fork just became a real branch — drop its placeholder.
-  if (materializedDraft) removeDraftFork(materializedDraft)
+  // The merge-fork draft just became a real segment — the new root node now
+  // carries parent_merged_node_id itself, so effectiveMergedNodeId keeps
+  // resolving correctly without this ref.
+  if (materializedMergeDraft) activeMergedNodeId.value = null
   drafting.value = false
   selectedId.value = r.assistantNodeId
-  refreshConvos() // bump this project to the top of the activity-ordered list
 }
 
 // ── Draft forks (persisted; see the declaration near the top) ──
@@ -362,6 +497,7 @@ function activateDraftFork(key: string, forkFromNodeId: string) {
   activeDraftKey.value = key
   forkPointId.value = forkFromNodeId // thread shows history up to here + fork divider
   selectedId.value = forkFromNodeId // composer targets this node as parent
+  activeMergedNodeId.value = null
 }
 function selectDraftFork(key: string) {
   const d = draftForks.value.find((x) => x.key === key)
@@ -381,7 +517,7 @@ function deleteDraftFork(key: string) {
   removeDraftFork(key)
   if (wasActive) {
     forkPointId.value = null
-    const tip = mostRecentChatTip(nodes.value)
+    const tip = mostRecentChatTip(nodes.value, currentUserId.value)
     if (tip) { selectedId.value = tip; drafting.value = false }
     else { selectedId.value = null; drafting.value = true }
   }
@@ -409,6 +545,36 @@ function confirmFork() {
   draftForks.value = [{ key, forkFromNodeId: id, createdAt: new Date().toISOString() }, ...draftForks.value]
   persistDraftForks()
   activateDraftFork(key, id)
+}
+
+// Forking a merged node: like confirmFork above, but the new segment has no
+// origin turn at all — it's a fresh root within this project, seeded with
+// the merged node's inherited context (see activateMergeDraft).
+function onForkMerge(mergedNodeId: string) {
+  logger.log('merge_fork', { merged_node_id: mergedNodeId }, { conversationId })
+  activateMergeDraft(mergedNodeId)
+}
+
+// Only the merge's own author gets the delete control at all (server
+// re-checks this too) — but forks of it may already have real turns in
+// them, possibly by other people, so warn before erasing those along with it.
+async function onDeleteMerge(mergedNodeId: string) {
+  const hasForks = nodes.value.some((n) => n.parent_merged_node_id === mergedNodeId)
+  const ok = confirm(
+    hasForks
+      ? 'This merge has been forked into a conversation node. Deleting it will also permanently erase that conversation node (and anything built on it since). Continue?'
+      : 'Delete this merged node? This cannot be undone.',
+  )
+  if (!ok) return
+  logger.log('merge_delete', { merged_node_id: mergedNodeId }, { conversationId })
+  try {
+    await $fetch('/api/merge/delete', { method: 'POST', body: { mergedNodeId } })
+  } catch (err: any) {
+    alert(err?.data?.statusMessage || 'Could not delete the merged node — please retry.')
+    return
+  }
+  await mergedNodesStore.refresh()
+  await conv.load() // pick up any forked segments the delete erased
 }
 
 async function onReact(payload: { nodeId: string; type: string }) {
@@ -463,10 +629,18 @@ const ownBranchNodes = computed(() => messages.value.filter((n) => n.author_id =
 const branchIsShared = computed(
   () => ownBranchNodes.value.length > 0 && ownBranchNodes.value.every((n) => n.visibility === 'shared'),
 )
-// Clicking the header button either asks for confirmation (nothing shared
+// Clicking the header button either opens the share picker (nothing shared
 // yet) or, if the whole branch is already shared, unshares it in one step —
 // mirrors the button's own label.
 const pendingShare = ref(false)
+const sharePending = ref(false)
+// Stopped at the button (see @click.stop in the template): opening the
+// picker mounts ShareDialog and attaches its own document click-listener
+// mid-bubble (Vue flushes the reactive update as a microtask *between*
+// individual listener invocations, not only after the whole dispatch ends)
+// — without stopping propagation here, this same click keeps bubbling to
+// document right after, hits that fresh listener, and immediately closes
+// the picker it just opened.
 function onShareButtonClick() {
   if (!selectiveSharing.value || !selectedId.value || !ownBranchNodes.value.length) return
   if (branchIsShared.value) unshareBranch()
@@ -476,23 +650,38 @@ function cancelShare() {
   pendingShare.value = false
 }
 
-// Share the whole current conversation (branch) — no partial cutoff, it's
-// all-or-nothing now that the turn picker is gone.
-async function confirmShare() {
-  pendingShare.value = false
-  const own = ownBranchNodes.value.filter((n) => n.visibility === 'private')
-  const ids = own.map((n) => n.id)
-  if (!ids.length) return
+// What the share picker offers: your own not-yet-shared nodes on this branch,
+// in conversation order.
+const privateOwnBranchNodes = computed(() => ownBranchNodes.value.filter((n) => n.visibility === 'private'))
+
+// Shared by both "Share all" and picking specific turns — only the set of
+// ids differs (all of them, vs. whatever the user checked).
+async function shareNodes(nodes: TreeNode[]) {
+  const ids = nodes.map((n) => n.id)
+  if (!ids.length) {
+    pendingShare.value = false
+    return
+  }
+  sharePending.value = true
   logger.log('toggle_visibility', { node_ids: ids, to: 'shared', scope: 'branch' }, { conversationId, nodeId: selectedId.value! })
   const { error } = await supabase.rpc('share_branch', { node_ids: ids })
+  sharePending.value = false
   if (error) return
+  pendingShare.value = false
   // Patch local state immediately — don't wait for the realtime round trip.
-  for (const n of own) conv.upsert({ ...n, visibility: 'shared' })
+  for (const n of nodes) conv.upsert({ ...n, visibility: 'shared' })
   // Teammates weren't authorized to see these rows before this update, and
   // Realtime's postgres_changes doesn't reliably deliver an UPDATE that newly
   // reveals a row to someone who couldn't select it beforehand — broadcast it
   // explicitly instead of waiting on an event that may never arrive for them.
   rt.broadcastReveal(ids)
+}
+function confirmShareAll() {
+  shareNodes(privateOwnBranchNodes.value)
+}
+function confirmShareSelected(ids: string[]) {
+  const picked = new Set(ids)
+  shareNodes(privateOwnBranchNodes.value.filter((n) => picked.has(n.id)))
 }
 
 async function unshareBranch() {
@@ -507,6 +696,47 @@ async function unshareBranch() {
   // filters it, which is why broadcastRetract exists for them below).
   for (const n of own) conv.upsert({ ...n, visibility: 'private' })
   rt.broadcastRetract(ids)
+}
+
+// individual_llm only: mint a public, read-only link over the currently
+// viewed thread (root through selectedId) and copy it to the clipboard —
+// there's no team canvas in this condition, so this is the only way to hand
+// a conversation to someone outside it. The button swaps to a checkmark
+// briefly, mirroring the per-message copy-confirmation pattern in ThreadPanel.
+const shareLinkPending = ref(false)
+const shareLinkCopied = ref(false)
+let shareLinkTimer: ReturnType<typeof setTimeout> | null = null
+
+// Bottom-of-screen fade in/out toast (see components/ui/UiToast.vue) — the
+// button's own checkmark is easy to miss if the user's eyes are elsewhere,
+// so this gives a second, harder-to-miss confirmation.
+const toastMessage = ref<string | null>(null)
+let toastTimer: ReturnType<typeof setTimeout> | null = null
+function showToast(message: string, duration = 2200) {
+  toastMessage.value = message
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { toastMessage.value = null }, duration)
+}
+
+async function shareConversation() {
+  if (!selectedId.value || shareLinkPending.value) return
+  shareLinkPending.value = true
+  try {
+    const { id } = await $fetch('/api/share/create', {
+      method: 'POST',
+      body: { conversationId, nodeId: selectedId.value },
+    })
+    logger.log('share_conversation', { node_id: selectedId.value, share_id: id }, { conversationId, nodeId: selectedId.value })
+    await navigator.clipboard.writeText(`${window.location.origin}/share/${id}`)
+    shareLinkCopied.value = true
+    if (shareLinkTimer) clearTimeout(shareLinkTimer)
+    shareLinkTimer = setTimeout(() => { shareLinkCopied.value = false }, 2000)
+    showToast('Conversation link copied to clipboard')
+  } catch (err: any) {
+    alert(err?.data?.statusMessage || 'Could not create the share link — please retry.')
+  } finally {
+    shareLinkPending.value = false
+  }
 }
 
 // Clear the whole tree — every member's branches — after an explicit confirm.
@@ -616,6 +846,7 @@ async function signOut() {
     <aside class="branchpanel">
       <ChatSidebar
         :nodes="nodes"
+        :current-user-id="currentUserId"
         :selected-id="selectedId"
         :drafting="drafting"
         :draft-forks="draftForks"
@@ -629,31 +860,45 @@ async function signOut() {
       <div class="threadcol">
         <header class="panelhdr">
           <div class="hdrtext">
-            <p class="crumb">{{ drafting ? 'New chat' : forkPointId ? 'Forked chat' : 'Chat' }}</p>
-            <h2>{{ drafting ? 'Start a new conversation' : branchTitle }}</h2>
+            <h2>{{ activeMergedNodeId ? 'Continue from merged context' : drafting ? 'Start a new conversation' : branchTitle }}</h2>
           </div>
           <div class="threadhdrside">
             <span v-if="forkOriginLabel" class="forkorigin">Forked from {{ forkOriginLabel }}</span>
             <UiButton
-              v-if="selectiveSharing && selectedId && !drafting && ownBranchNodes.length"
+              v-if="individualLlm && selectedId && !drafting"
               variant="soft"
               class="sharebtn"
-              :class="{ active: branchIsShared }"
-              @click="onShareButtonClick"
+              :disabled="shareLinkPending"
+              title="Copy a read-only link to this conversation"
+              @click="shareConversation"
             >
-              {{ branchIsShared ? 'Unshare branch' : 'Share branch' }}
+              <AppIcon :name="shareLinkCopied ? 'check' : 'share'" :size="13" />
+              {{ shareLinkCopied ? 'Link copied' : 'Share' }}
             </UiButton>
+            <div class="sharewrap">
+              <UiButton
+                v-if="selectiveSharing && selectedId && !drafting && ownBranchNodes.length"
+                variant="soft"
+                class="sharebtn"
+                :class="{ active: branchIsShared }"
+                @click.stop="onShareButtonClick"
+              >
+                {{ branchIsShared ? 'Unshare branch' : 'Share branch' }}
+              </UiButton>
+              <ShareDialog
+                v-if="pendingShare"
+                :nodes="privateOwnBranchNodes"
+                :member-names="memberNames"
+                :busy="sharePending"
+                @share-all="confirmShareAll"
+                @confirm="confirmShareSelected"
+                @cancel="cancelShare"
+              />
+            </div>
           </div>
         </header>
-        <UiConfirmDialog
-          v-if="pendingShare"
-          title="Share this conversation to the team?"
-          @confirm="confirmShare"
-          @cancel="cancelShare"
-        />
         <ThreadPanel
           :messages="messages"
-          :turn-numbers="turnNumberByNode"
           :fork-point-id="forkOriginNodeId"
           :member-names="memberNames"
           :current-user-id="currentUserId"
@@ -664,6 +909,7 @@ async function signOut() {
           :is-streaming="isStreaming"
           :error="error"
           :drafting="drafting"
+          :inherited-groups="inheritedGroups ?? []"
         />
         <Composer
           :conversation-id="conversationId"
@@ -687,7 +933,6 @@ async function signOut() {
       />
       <header class="panelhdr">
         <div>
-          <p class="crumb">Project</p>
           <h1>{{ convo?.title || 'Untitled' }}</h1>
         </div>
         <div class="hdrside">
@@ -705,12 +950,38 @@ async function signOut() {
               />
             </div>
           </div>
-          <UiButton v-if="nodes.length" variant="danger" size="sm" class="clearbtn" :disabled="isStreaming" @click="clearTree">
+          <UiButton
+            v-if="nodes.length && profile?.role === 'researcher'"
+            variant="danger"
+            size="sm"
+            class="clearbtn"
+            :disabled="isStreaming"
+            @click="clearTree"
+          >
             Clear tree
           </UiButton>
         </div>
       </header>
+      <CanvasFilterBar
+        :authors="contributorAvatars"
+        :author-id="filterAuthorId"
+        :topics="availableTopics"
+        :concept-id="filterConceptId"
+        @update:author-id="onFilterAuthorId"
+        @update:concept-id="onFilterConceptId"
+      />
+      <p v-if="mergeMode.state.active" class="mergehint">Select conversation nodes to organize them into a new merged node.</p>
       <div class="treewrap">
+        <UiButton
+          v-if="!mergeMode.state.active"
+          variant="ghost"
+          size="sm"
+          class="mergebtn"
+          :disabled="isStreaming"
+          @click="mergeMode.enter()"
+        >
+          Merge
+        </UiButton>
         <ReasoningTree
           :nodes="nodes"
           :reactions-by-node="reactionsByNode"
@@ -718,21 +989,52 @@ async function signOut() {
           :current-user-id="currentUserId"
           :member-names="memberNames"
           :show-visibility="selectiveSharing"
+          :merged-nodes="mergedNodesStore.nodes.value"
+          :merge-mode="mergeMode.state.active"
+          :merge-selected-ids="mergeMode.state.selectedIds"
+          :highlight-author-id="filterAuthorId"
+          :concepts-by-segment="conceptsStore.bySegment"
+          :concepts-pending="conceptsStore.pending"
+          :highlight-concept-id="filterConceptId"
           @select="select"
           @fork="onFork"
           @react="onReact"
           @unreact="onUnreact"
           @toggle-visibility="onToggleVisibility"
+          @toggle-merge-select="onToggleMergeSelect"
+          @fork-merge="onForkMerge"
+          @delete-merge="onDeleteMerge"
+          @request-concepts="onRequestConcepts"
         />
       </div>
+
+      <div v-if="mergeMode.state.active" class="mergebar">
+        <span>{{ mergeMode.state.selectedIds.size }} conversation node{{ mergeMode.state.selectedIds.size === 1 ? '' : 's' }} selected</span>
+        <div class="mergebaractions">
+          <UiButton variant="ghost" @click="mergeMode.cancel()">Cancel</UiButton>
+          <UiButton variant="primary" :disabled="!canContinueMerge" @click="openMergeModal">Continue</UiButton>
+        </div>
+      </div>
     </main>
+
+    <MergeModal
+      v-if="showMergeModal"
+      :conversation-id="conversationId"
+      :sources="modalSources"
+      :member-names="memberNames"
+      @created="onMergeCreated"
+      @cancel="cancelMergeModal"
+    />
 
     <UiConfirmDialog
       v-if="pendingForkId"
       title="Fork from here and start a new conversation?"
+      description="You can continue chatting with AI with the prior conversation in this node as context. Your new messages will build on this context."
       @confirm="confirmFork"
       @cancel="cancelFork"
     />
+
+    <UiToast :message="toastMessage" />
   </div>
 </template>
 
@@ -771,7 +1073,6 @@ async function signOut() {
 }
 .panelhdr h1, .panelhdr h2 {
   margin: 0;
-  font-family: 'Fraunces', serif;
   font-weight: 600;
   font-size: 18px;
   line-height: 1.25;
@@ -780,6 +1081,7 @@ async function signOut() {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.panelhdr h1, .panelhdr h2 { font-family: 'Geist', sans-serif; }
 .hdrtext { min-width: 0; }
 .hdrmeta { margin: 0; flex: none; font-size: 12.5px; color: var(--muted); }
 .hdrside { display: flex; align-items: center; gap: 12px; flex: none; }
@@ -800,7 +1102,40 @@ async function signOut() {
   min-width: 0;
   border-left: 2px solid var(--panel-edge);
 }
-.treewrap { flex: 1; min-height: 0; }
+.treewrap { position: relative; flex: 1; min-height: 0; }
+.mergebtn {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 5;
+  background: var(--card);
+  box-shadow: 0 6px 20px rgba(15, 15, 20, 0.12);
+}
+.mergehint {
+  margin: 0;
+  padding: 8px 22px;
+  font-size: 12.5px;
+  color: var(--muted);
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--line);
+}
+.mergebar {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 12px 18px;
+  background: var(--ink);
+  color: #fff;
+  border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(20, 20, 30, 0.3);
+  font-size: 13.5px;
+}
+.mergebaractions { display: flex; gap: 10px; }
 
 .branchpanel {
   display: flex;
@@ -848,6 +1183,7 @@ async function signOut() {
   font-size: 12px;
   color: var(--muted);
 }
+.sharewrap { position: relative; flex: none; }
 .sharebtn { flex: none; }
 .sharebtn.active { background: var(--accent); color: #fff; }
 .sharebtn.active:hover { background: var(--accent-soft); color: var(--accent); }

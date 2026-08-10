@@ -52,7 +52,12 @@ export async function buildLineageMessages(
   if (error) {
     throw createError({ statusCode: 500, statusMessage: `lineage failed: ${error.message}` })
   }
-  const lineage = (data ?? []) as { id: string; role: LLMMessage['role']; content: string }[]
+  const lineage = (data ?? []) as {
+    id: string
+    role: LLMMessage['role']
+    content: string
+    parent_merged_node_id: string | null
+  }[]
 
   const { data: attRows } = await admin
     .from('attachments')
@@ -69,6 +74,14 @@ export async function buildLineageMessages(
   }
 
   const messages: LLMMessage[] = [{ role: 'system', content: SYSTEM_PROMPT }]
+  // If this lineage's root (oldest row — a fresh segment forked from a merged
+  // context node, see server/api/chat.post.ts) carries a merged-node
+  // reference, splice its frozen source trajectories in here, on every turn,
+  // rather than ever copying them into this segment's own nodes.
+  const mergedNodeId = lineage[0]?.parent_merged_node_id
+  if (mergedNodeId) {
+    messages.push({ role: 'system', content: await buildMergedContextSystemMessage(admin, mergedNodeId) })
+  }
   for (const n of lineage) {
     const atts = attsByNode.get(n.id)
     if (!atts?.length) {

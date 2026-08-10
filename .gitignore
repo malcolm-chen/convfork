@@ -21,5 +21,6 @@ __pycache__/
 
 # Backups / local data
 backups/
+exports/
 *.dump
 *.sql.gz

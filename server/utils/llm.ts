@@ -119,7 +119,13 @@ async function completeOnce(
         'content-type': 'application/json',
         authorization: `Bearer ${c.litellmApiKey}`,
       },
-      body: JSON.stringify({ model, messages, stream: false, max_tokens: maxTokens, temperature: 0.2 }),
+      // No fixed temperature: some backbones (e.g. gpt-5.5, a reasoning
+      // model) hard-reject any non-default value with a 400, which
+      // completeLLM's fallback chain masked by silently retrying on the
+      // next configured model — every call paid for a failed attempt
+      // first. Confirmed live against the LiteLLM proxy: identical request
+      // succeeds immediately once temperature is omitted.
+      body: JSON.stringify({ model, messages, stream: false, max_tokens: maxTokens }),
     })
   } catch (err: any) {
     throw createError({

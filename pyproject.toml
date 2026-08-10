@@ -10,6 +10,7 @@ dependencies = [
     "boto3>=1.35.0",
 ]
 
-# Run the proxy:   uv run litellm --config litellm-config.yaml
-# Seed accounts:   uv run python scripts/seed_users.py
-# Back up the DB:  uv run python scripts/backup.py
+# Run the proxy:     uv run litellm --config litellm-config.yaml
+# Seed accounts:     uv run python scripts/seed_users.py
+# Back up the DB:    uv run python scripts/backup.py
+# Export a session:  uv run python scripts/export_session.py <SESSION_ID>

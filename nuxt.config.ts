@@ -33,6 +33,9 @@ export default defineNuxtConfig({
     '@vue-flow/core/dist/style.css',
     '@vue-flow/core/dist/theme-default.css',
     '@vue-flow/controls/dist/style.css',
+    // Self-hosted (not on Google Fonts) — used for conversation node titles.
+    '@fontsource/geist/600.css',
+    '@fontsource/geist/700.css',
   ],
 
   // @nuxtjs/supabase injects useSupabaseClient() / serverSupabaseUser() and
@@ -44,8 +47,10 @@ export default defineNuxtConfig({
     redirectOptions: {
       login: '/login',
       callback: '/confirm',
-      // /admin is gated by the study-admin cookie, not a participant Supabase session.
-      exclude: ['/login', '/admin'],
+      // /admin is gated by the study-admin cookie, not a participant Supabase
+      // session; /share/* links are public/unauthenticated by design (see
+      // pages/share/[id].vue).
+      exclude: ['/login', '/admin', '/share/*'],
     },
   },
 

@@ -17,6 +17,7 @@
   --accent-soft: #eef0fd;
   --danger: #a2453c;
   --danger-soft: #f9edeb;
+  --highlight: #e0a020;
 
   /* Dark left rail (team + projects) */
   --nav-bg: #0e0e10;

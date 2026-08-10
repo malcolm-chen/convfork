@@ -3,26 +3,53 @@ import type { Attachment, TreeNode } from '~/composables/useConversation'
 import { renderMarkdown } from '~/utils/markdown'
 import { MODEL_OPTIONS } from '~/shared/models'
 
+export interface InheritedMessage {
+  id: string
+  role: 'user' | 'assistant'
+  authorName: string
+  content: string
+  created_at: string
+}
+export interface InheritedGroup {
+  segmentHeadNodeId: string
+  label: string
+  messages: InheritedMessage[]
+}
+
 const props = defineProps<{
   messages: TreeNode[] // linear path from root → selected node
-  turnNumbers?: Map<string, number> // node id → 1-based position within its own segment (matches the canvas cards)
   forkPointId?: string | null // when set, messages up to here are prior history
   memberNames?: Record<string, string>
   currentUserId?: string
   attachmentsByNode?: Map<string, Attachment[]>
+  // Forwarded to AttachmentList — lets the public share page (no logged-in
+  // session) point attachment links at its own unauthenticated route.
+  attachmentBasePath?: string
   streamingText: string
   streamingReasoning?: string
   streamingModel?: string | null // the model backbone the in-flight reply is using
   isStreaming: boolean
   error: string | null
   drafting?: boolean
+  // Read-only history from a merged context node's source conversations
+  // (see server/api/merge/[id].get.ts), shown above everything else with
+  // one divider per source and a closing "End of forked context" divider.
+  inheritedGroups?: InheritedGroup[]
 }>()
+
+// The group's own "primary author" label for its divider — the first human
+// speaker in that source trajectory (falls back to the group title alone if
+// it was somehow all-assistant).
+function groupAuthorLabel(g: InheritedGroup) {
+  return g.messages.find((m) => m.role === 'user')?.authorName ?? null
+}
+
+function inheritedTime(m: InheritedMessage) {
+  return new Date(m.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
 
 function attachmentsOf(m: TreeNode): Attachment[] {
   return props.attachmentsByNode?.get(m.id) ?? []
-}
-function turnNumberOf(m: TreeNode): number | null {
-  return props.turnNumbers?.get(m.id) ?? null
 }
 
 // Short display label for a model id (e.g. "gpt-5.5" → "GPT-5.5"), shown as a
@@ -49,6 +76,24 @@ function turnTime(m: TreeNode) {
   return new Date(m.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }
 
+// Briefly swaps the clicked message's copy icon for a checkmark — mirrors
+// ChatGPT's copy-confirmation pattern. Keyed by message id so only the
+// clicked row's icon changes.
+const copiedId = ref<string | null>(null)
+let copiedTimer: ReturnType<typeof setTimeout> | null = null
+async function copyContent(id: string, content: string) {
+  try {
+    await navigator.clipboard.writeText(content)
+  } catch {
+    return
+  }
+  copiedId.value = id
+  if (copiedTimer) clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => {
+    copiedId.value = null
+  }, 1500)
+}
+
 // Keep the newest message in view as the thread grows or tokens stream in.
 const scroller = ref<HTMLElement | null>(null)
 watch(
@@ -59,33 +104,81 @@ watch(
 
 <template>
   <div ref="scroller" class="thread">
+    <template v-if="inheritedGroups?.length">
+      <div class="inheritedbanner">
+        <AppIcon name="merge" :size="13" />
+        Below are the conversation trajectories inherited from the merge.
+      </div>
+      <div v-for="g in inheritedGroups" :key="g.segmentHeadNodeId" class="inheritedgroup">
+        <div class="forkdivider">
+          <span v-if="groupAuthorLabel(g)">Below is {{ groupAuthorLabel(g) }}'s conversation trajectory</span>
+          <span v-else>Below is the conversation trajectory</span>
+        </div>
+        <template v-for="m in g.messages" :key="m.id">
+          <div v-if="m.role === 'assistant'" class="turn assistant prior">
+            <span class="aiavatar">AI</span>
+            <div class="turnbody">
+              <ClientOnly>
+                <div class="body md" v-html="renderMarkdown(m.content)" />
+                <template #fallback><div class="body">{{ m.content }}</div></template>
+              </ClientOnly>
+              <div class="turnfooter">
+                <div class="time">{{ inheritedTime(m) }}</div>
+                <button
+                  type="button"
+                  class="copybtn"
+                  :title="copiedId === m.id ? 'Copied!' : 'Copy'"
+                  @click="copyContent(m.id, m.content)"
+                >
+                  <AppIcon :name="copiedId === m.id ? 'check' : 'copy'" :size="13" />
+                </button>
+              </div>
+            </div>
+          </div>
+          <div v-else class="msg user prior">
+            <UiAvatar class="mavatar" :name="m.authorName" :color-key="m.authorName" :size="28" />
+            <div class="bubble">
+              <div class="meta">{{ m.authorName }}</div>
+              <div v-if="m.content" class="body">{{ m.content }}</div>
+              <div class="time">{{ inheritedTime(m) }}</div>
+            </div>
+          </div>
+        </template>
+      </div>
+      <div class="enddivider"><span>End of forked context. Continue chatting below</span></div>
+    </template>
+
     <div v-if="prior.length" class="priorwrap">
       <template v-for="m in prior" :key="m.id">
         <!-- Assistant: ChatGPT-style full-width, no bubble, markdown-rendered -->
         <div v-if="m.role === 'assistant'" class="turn assistant prior">
           <span class="aiavatar">AI</span>
           <div class="turnbody">
-            <div v-if="modelLabel(m.model) || turnNumberOf(m)" class="meta">
-              <span v-if="turnNumberOf(m)" class="turnnum">#{{ turnNumberOf(m) }}</span>
-              <template v-if="modelLabel(m.model)">{{ modelLabel(m.model) }}</template>
-            </div>
+            <div v-if="modelLabel(m.model)" class="meta">{{ modelLabel(m.model) }}</div>
             <ThinkingBlock v-if="m.reasoning" :reasoning="m.reasoning" />
             <ClientOnly>
               <div class="body md" v-html="renderMarkdown(m.content)" />
               <template #fallback><div class="body">{{ m.content }}</div></template>
             </ClientOnly>
-            <div class="time">{{ turnTime(m) }}</div>
+            <div class="turnfooter">
+              <div class="time">{{ turnTime(m) }}</div>
+              <button
+                type="button"
+                class="copybtn"
+                :title="copiedId === m.id ? 'Copied!' : 'Copy'"
+                @click="copyContent(m.id, m.content)"
+              >
+                <AppIcon :name="copiedId === m.id ? 'check' : 'copy'" :size="13" />
+              </button>
+            </div>
           </div>
         </div>
         <!-- User: right-aligned bubble -->
         <div v-else class="msg user prior">
           <UiAvatar class="mavatar" :name="authorName(m)" :color-key="m.author_id" :size="28" />
           <div class="bubble">
-            <div class="meta">
-              <span v-if="turnNumberOf(m)" class="turnnum">#{{ turnNumberOf(m) }}</span>
-              {{ authorName(m) }}
-            </div>
-            <AttachmentList :attachments="attachmentsOf(m)" />
+            <div class="meta">{{ authorName(m) }}</div>
+            <AttachmentList :attachments="attachmentsOf(m)" :base-path="attachmentBasePath" />
             <div v-if="m.content" class="body">{{ m.content }}</div>
             <div class="time">{{ turnTime(m) }}</div>
           </div>
@@ -101,26 +194,30 @@ watch(
       <div v-if="m.role === 'assistant'" class="turn assistant">
         <span class="aiavatar">AI</span>
         <div class="turnbody">
-          <div v-if="modelLabel(m.model) || turnNumberOf(m)" class="meta">
-            <span v-if="turnNumberOf(m)" class="turnnum">#{{ turnNumberOf(m) }}</span>
-            <template v-if="modelLabel(m.model)">{{ modelLabel(m.model) }}</template>
-          </div>
+          <div v-if="modelLabel(m.model)" class="meta">{{ modelLabel(m.model) }}</div>
           <ThinkingBlock v-if="m.reasoning" :reasoning="m.reasoning" />
           <ClientOnly>
             <div class="body md" v-html="renderMarkdown(m.content)" />
             <template #fallback><div class="body">{{ m.content }}</div></template>
           </ClientOnly>
-          <div class="time">{{ turnTime(m) }}</div>
+          <div class="turnfooter">
+            <div class="time">{{ turnTime(m) }}</div>
+            <button
+              type="button"
+              class="copybtn"
+              :title="copiedId === m.id ? 'Copied!' : 'Copy'"
+              @click="copyContent(m.id, m.content)"
+            >
+              <AppIcon :name="copiedId === m.id ? 'check' : 'copy'" :size="13" />
+            </button>
+          </div>
         </div>
       </div>
       <div v-else class="msg user">
         <UiAvatar class="mavatar" :name="authorName(m)" :color-key="m.author_id" :size="28" />
         <div class="bubble">
-          <div class="meta">
-            <span v-if="turnNumberOf(m)" class="turnnum">#{{ turnNumberOf(m) }}</span>
-            {{ authorName(m) }}
-          </div>
-          <AttachmentList :attachments="attachmentsOf(m)" />
+          <div class="meta">{{ authorName(m) }}</div>
+          <AttachmentList :attachments="attachmentsOf(m)" :base-path="attachmentBasePath" />
           <div v-if="m.content" class="body">{{ m.content }}</div>
           <div class="time">{{ turnTime(m) }}</div>
         </div>
@@ -142,7 +239,10 @@ watch(
 
     <p v-if="error" class="err">⚠️ {{ error }}</p>
     <p v-if="!messages.length && !streamingText" class="empty">
-      <template v-if="drafting">
+      <template v-if="drafting && inheritedGroups?.length">
+        Continue chatting with the agent below.
+      </template>
+      <template v-else-if="drafting">
         Send a message to start this chat.
       </template>
       <template v-else>
@@ -204,12 +304,26 @@ watch(
 .msg.prior.user .bubble { background: #6f86d8; }
 
 .meta { font-size: 10px; opacity: 0.7; margin-bottom: 4px; }
-.turnnum { font-weight: 700; margin-right: 5px; opacity: 0.85; }
 .body { white-space: pre-wrap; font-size: 13.5px; line-height: 1.5; overflow-wrap: break-word; }
 .time { margin-top: 4px; text-align: right; font-size: 10px; font-variant-numeric: tabular-nums; }
 .bubble .time { color: rgba(255, 255, 255, 0.75); }
 .msg.prior .bubble .time { color: rgba(255, 255, 255, 0.6); }
-.turnbody .time { color: var(--muted); text-align: left; }
+.turnbody .time { color: var(--muted); text-align: left; margin-top: 0; }
+.turnfooter { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.copybtn {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.copybtn:hover { background: var(--accent-soft); color: var(--ink); }
 .caret { display: inline-block; margin-left: 1px; animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
@@ -283,6 +397,40 @@ watch(
   background: var(--line);
 }
 .forkdivider span { max-width: 260px; }
+
+.inheritedbanner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+.inheritedgroup { display: flex; flex-direction: column; gap: 12px; opacity: 0.85; }
+.inheritedgroup .forkdivider span { font-weight: 600; max-width: none; }
+/* A hard, unmissable boundary — the inherited block above looks almost like
+   a live chat, so this needs to read as a wall, not a subtle label like the
+   thin text-only .forkdivider used elsewhere. */
+.enddivider {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 4px 0 14px;
+  padding: 8px 0;
+  border-top: 2px dashed var(--line);
+  border-bottom: 2px dashed var(--line);
+}
+.enddivider span {
+  text-transform: uppercase;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
 
 .err { color: var(--danger); font-size: 13px; }
 .empty { color: var(--muted); text-align: center; margin-top: 48px; font-size: 13.5px; line-height: 1.6; }

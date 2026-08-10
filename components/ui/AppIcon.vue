@@ -100,11 +100,44 @@ const ICONS: Record<string, FillIcon | StrokeIcon> = {
     vb: '0 0 24 24',
     shapes: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
   },
+  check: {
+    kind: 'stroke',
+    vb: '0 0 24 24',
+    shapes: '<polyline points="20 6 9 17 4 12"/>',
+  },
+  copy: {
+    kind: 'stroke',
+    vb: '0 0 24 24',
+    shapes:
+      '<rect x="9" y="9" width="13" height="13" rx="2"/>' +
+      '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  },
+  // Three nodes + connecting lines — the standard "share" glyph.
+  share: {
+    kind: 'stroke',
+    vb: '0 0 24 24',
+    shapes:
+      '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>' +
+      '<line x1="8.6" y1="10.6" x2="15.4" y2="6.4"/><line x1="8.6" y1="13.4" x2="15.4" y2="17.6"/>',
+  },
+  filter: {
+    kind: 'stroke',
+    vb: '0 0 24 24',
+    shapes: '<polygon points="4 4 20 4 14 12.5 14 19 10 21 10 12.5 4 4"/>',
+  },
   file: {
     kind: 'stroke',
     vb: '0 0 24 24',
     shapes:
       '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>',
+  },
+  // Two branches converging into one — the merged-context node glyph.
+  merge: {
+    kind: 'stroke',
+    vb: '0 0 24 24',
+    shapes:
+      '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="12" r="3"/>' +
+      '<path d="M6 9v3a3 3 0 0 0 3 3h1"/><path d="M15 12h-5"/>',
   },
 }
 

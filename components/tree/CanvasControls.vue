@@ -2,11 +2,14 @@
 import { useVueFlow } from '@vue-flow/core'
 
 const { zoomIn, zoomOut, fitView, viewport } = useVueFlow()
-// A fitView() computed off an unmeasured (zero-size) pane or node set can
-// leave viewport.zoom as NaN/Infinity (see ReasoningTree.vue) — never surface
-// that to the user as "NaN%"; fall back to 100% until a real zoom lands.
+// `viewport` is a Ref (see vue-flow's own Controls package: it reads
+// viewport.value.zoom) — reading .zoom directly on the ref itself is
+// undefined, which is how this got stuck reporting 100% forever regardless
+// of the actual zoom level. A fitView() computed off an unmeasured (zero-size)
+// pane or node set can also leave the real zoom as NaN/Infinity, so keep the
+// fallback for that case too — just never surface either as "NaN%"/"undefined%".
 const pct = computed(() => {
-  const z = Math.round(viewport.zoom * 100)
+  const z = Math.round(viewport.value.zoom * 100)
   return Number.isFinite(z) ? z : 100
 })
 </script>

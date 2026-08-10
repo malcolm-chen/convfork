@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import type { Attachment } from '~/composables/useConversation'
 
-defineProps<{ attachments: Attachment[] }>()
+// basePath lets the public share page (pages/share/[id].vue) point these at
+// its own unauthenticated attachment route instead of the logged-in one.
+const props = withDefaults(defineProps<{ attachments: Attachment[]; basePath?: string }>(), {
+  basePath: '/api/attachments/',
+})
 
 function fileUrl(a: Attachment) {
-  return `/api/attachments/${a.id}`
+  return `${props.basePath}${a.id}`
 }
 function formatSize(bytes: number) {
   return bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)}KB` : `${(bytes / (1024 * 1024)).toFixed(1)}MB`

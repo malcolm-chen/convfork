@@ -2,6 +2,7 @@
 withDefaults(
   defineProps<{
     title: string
+    description?: string
     confirmLabel?: string
     cancelLabel?: string
     busy?: boolean
@@ -20,7 +21,8 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
 <template>
   <div class="backdrop" @click.self="emit('cancel')">
     <div class="dialog" role="alertdialog" aria-modal="true" :aria-label="title">
-      <h3 class="dtitle">{{ title }}</h3>
+      <h3 class="dtitle" :class="{ withdesc: description }">{{ title }}</h3>
+      <p v-if="description" class="ddesc">{{ description }}</p>
       <div class="dactions">
         <UiButton variant="ghost" class="cancelbtn" :disabled="busy" @click="emit('cancel')">{{ cancelLabel }}</UiButton>
         <UiButton variant="primary" class="confirmbtn" :disabled="busy" @click="emit('confirm')">
@@ -64,6 +66,14 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
   font-weight: 700;
   line-height: 1.3;
   color: var(--ink);
+}
+.dtitle.withdesc { margin-bottom: 8px; }
+
+.ddesc {
+  margin: 0 0 28px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--muted);
 }
 
 .dactions { display: flex; justify-content: flex-end; gap: 12px; }

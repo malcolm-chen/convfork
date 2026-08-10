@@ -19,6 +19,10 @@ export function useLLMStream() {
     thinking?: string
     attachments?: AttachmentRef[]
     isFork?: boolean
+    // Only meaningful when parentNodeId is null: starts a new segment forked
+    // from a merged context node (see pages/conversation/[id].vue's
+    // activateMergeDraft / server/api/chat.post.ts).
+    mergedNodeId?: string
     // Fired synchronously with the (client-generated) user node id, before the
     // request is even sent — lets the caller render the user's turn right
     // away instead of waiting on the full round trip / SSE stream to finish.

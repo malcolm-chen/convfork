@@ -25,6 +25,10 @@ interface ChatBody {
   thinking?: string
   attachments?: AttachmentRef[]
   isFork?: boolean
+  // Only meaningful when parentNodeId is null: this turn starts a brand new
+  // segment (conversation node) forked from a merged context node — see the
+  // "Fork" action on a merged node card, components/tree/MergedNodeCard.vue.
+  mergedNodeId?: string
 }
 
 export default defineEventHandler(async (event) => {
@@ -100,6 +104,23 @@ export default defineEventHandler(async (event) => {
     isForkPoint = body.isFork === true || isForkFromOther || (count ?? 0) > 0
   }
 
+  // A merged-node fork starts a brand new root-level segment (parent_id
+  // null already makes it a segment start — see useSegments.ts's isStart —
+  // no is_fork_point needed) that carries a reference back to the merged
+  // node it was forked from.
+  let mergedNodeId: string | null = null
+  if (!body.parentNodeId && body.mergedNodeId) {
+    const { data: mergedNode } = await admin
+      .from('merged_context_nodes')
+      .select('id, conversation_id')
+      .eq('id', body.mergedNodeId)
+      .single()
+    if (!mergedNode || mergedNode.conversation_id !== body.conversationId) {
+      throw createError({ statusCode: 400, statusMessage: 'invalid merged node' })
+    }
+    mergedNodeId = mergedNode.id
+  }
+
   // 1) persist the user node BEFORE streaming (idempotent upsert by id)
   const userNodeId = body.userNodeId || crypto.randomUUID()
   const { error: userErr } = await admin.from('nodes').upsert(
@@ -112,6 +133,7 @@ export default defineEventHandler(async (event) => {
       content: body.userText,
       visibility,
       is_fork_point: isForkPoint,
+      parent_merged_node_id: mergedNodeId,
     },
     { onConflict: 'id' },
   )
