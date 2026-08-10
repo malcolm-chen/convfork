@@ -2,7 +2,7 @@
 // The backbone is picked per-request (see shared/models.ts + the composer's
 // dropdown), not fixed in config.
 
-import { DEFAULT_MODEL_ID, MODEL_OPTIONS, type ThinkingEffort } from '../../shared/models'
+import { DEFAULT_MODEL_ID, MODEL_OPTIONS, type ThinkingEffort } from '#shared/models'
 
 // Content blocks follow the OpenAI Chat Completions multimodal shape —
 // LiteLLM normalizes these into each provider's native format (verified live:

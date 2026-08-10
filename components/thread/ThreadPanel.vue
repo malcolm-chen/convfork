@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Attachment, TreeNode } from '~/composables/useConversation'
 import { renderMarkdown } from '~/utils/markdown'
-import { MODEL_OPTIONS } from '~/shared/models'
+import { MODEL_OPTIONS } from '#shared/models'
 
 export interface InheritedMessage {
   id: string

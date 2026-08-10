@@ -13,7 +13,7 @@
 // sharedSegments()), which must never reach an LLM call or a team-visible
 // concept.
 
-import { MODEL_OPTIONS } from '../../../shared/models'
+import { MODEL_OPTIONS } from '#shared/models'
 
 interface Body {
   conversationId: string

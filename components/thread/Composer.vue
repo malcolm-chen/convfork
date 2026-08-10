@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { DEFAULT_MODEL_ID, MODEL_OPTIONS, type ThinkingEffort } from '../../shared/models'
+import { DEFAULT_MODEL_ID, MODEL_OPTIONS, type ThinkingEffort } from '#shared/models'
 import type { AttachmentRef } from '~/composables/useFileUpload'
 
 const props = defineProps<{

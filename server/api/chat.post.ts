@@ -5,7 +5,7 @@
 //    can't drop the answer (§8.3)
 //  - cross-member forks recorded in team_interaction_logs (§5.3)
 
-import { DEFAULT_MODEL_ID, MODEL_OPTIONS } from '../../shared/models'
+import { DEFAULT_MODEL_ID, MODEL_OPTIONS } from '#shared/models'
 
 interface AttachmentRef {
   key: string

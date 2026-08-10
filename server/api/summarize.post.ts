@@ -3,7 +3,7 @@
 // Stateless: the client sends the trajectory transcript and gets back a title.
 // Callers cache the result (see composables/useNodeSummaries).
 
-import { MODEL_OPTIONS } from '../../shared/models'
+import { MODEL_OPTIONS } from '#shared/models'
 
 interface Body {
   text: string
