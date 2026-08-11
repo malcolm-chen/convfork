@@ -15,12 +15,14 @@ const emit = defineEmits<{
   (e: 'cancel'): void
 }>()
 
-// Defaults to everything selected — "Confirm" with no changes behaves the
-// same as "Share all", the picker is purely for narrowing that down.
-const selected = ref<Set<string>>(new Set(props.nodes.map((n) => n.id)))
+// Defaults to nothing selected — clicking a turn adds it to the share set.
+// "Share all" (above) is the explicit one-click path for sharing everything;
+// this list is for picking specific turns, so it must start empty or every
+// click on a turn the user actually wants to share would uncheck it instead.
+const selected = ref<Set<string>>(new Set())
 watch(
   () => props.nodes.map((n) => n.id).join(','),
-  () => { selected.value = new Set(props.nodes.map((n) => n.id)) },
+  () => { selected.value = new Set() },
 )
 
 function toggle(id: string) {

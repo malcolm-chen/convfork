@@ -35,12 +35,17 @@ async function attachmentBlocks(atts: AttachmentRow[]): Promise<LLMContentBlock[
   return blocks
 }
 
-// No system prompt here at all was the base-model default: heavy on bullet
-// lists and hedging, light on natural conversational tone. This steers it the
-// other way, toward how people actually text back and forth.
-const SYSTEM_PROMPT = `You are a knowledgeable, easygoing conversational partner in a live text chat.
-
-Write like a sharp, friendly person replying in the moment — flowing prose in short paragraphs, not a report. Only use a bulleted or numbered list when the content is genuinely a sequence of discrete steps or items AND a list would be clearly easier to follow than prose — never as your default structure. Skip headers, bold "key terms", and restating the question back before answering. Match your reply's length to the question: quick questions get quick answers; only go long when the topic truly calls for it.`
+// Same prompt for every backbone — callLLM() never branches the message
+// content on `model`, only the reasoning-effort param (see EFFORT_PARAM_VALUES
+// in llm.ts). Kept as a plain .txt server asset (nuxt.config.ts's
+// nitro.serverAssets) rather than a code string so it can be edited directly
+// without a code change — no system prompt at all was the base-model default:
+// heavy on bullet lists and hedging, light on natural conversational tone.
+async function loadSystemPrompt(): Promise<string> {
+  const raw = await useStorage('assets:prompts').getItemRaw('system-prompt.txt')
+  if (!raw) throw createError({ statusCode: 500, statusMessage: 'server/assets/prompts/system-prompt.txt not found' })
+  return raw.toString('utf8').trim()
+}
 
 // Rebuild the conversation context for a node: walk parent_id to the root via
 // the get_lineage() SQL function, oldest→newest, mapped to LLM messages.
@@ -73,7 +78,7 @@ export async function buildLineageMessages(
     attsByNode.set(a.node_id, arr)
   }
 
-  const messages: LLMMessage[] = [{ role: 'system', content: SYSTEM_PROMPT }]
+  const messages: LLMMessage[] = [{ role: 'system', content: await loadSystemPrompt() }]
   // If this lineage's root (oldest row — a fresh segment forked from a merged
   // context node, see server/api/chat.post.ts) carries a merged-node
   // reference, splice its frozen source trajectories in here, on every turn,

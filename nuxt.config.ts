@@ -86,5 +86,10 @@ export default defineNuxtConfig({
   nitro: {
     // Always-on Node host (e.g. Lightsail) — clean SSE, no serverless timeout.
     preset: 'node-server',
+    // The chat system prompt lives as a plain .txt file (see
+    // server/utils/lineage.ts) so it can be edited without touching code.
+    // Bundled via Nitro's asset system rather than a raw fs path so it
+    // survives `nuxt build` (the output dir doesn't mirror the source tree).
+    serverAssets: [{ baseName: 'prompts', dir: './server/assets/prompts' }],
   },
 })

@@ -96,6 +96,7 @@ function activateMergeDraft(mergedNodeId: string) {
   // just one composer ready to go — so the thread panel shows "send a
   // message to continue" instead of the "select a chat from the list" empty
   // state meant for when nothing at all is active.
+  error.value = null // a failed send in a previous chat shouldn't bleed into this one
   drafting.value = true
   selectedId.value = null
   forkPointId.value = null
@@ -391,6 +392,7 @@ onBeforeUnmount(() => {
 
 function select(id: string) {
   logger.log('select_branch', { node_id: id, from_node_id: selectedId.value }, { conversationId, nodeId: id })
+  error.value = null // a failed send in a previous chat shouldn't bleed into this one
   drafting.value = false
   activeDraftKey.value = null // leaving a draft fork just deselects it; it stays in the list
   if (id !== forkPointId.value) forkPointId.value = null // navigating away ends fork mode
@@ -400,6 +402,7 @@ function select(id: string) {
 
 function startNewChat() {
   logger.log('new_chat', {}, { conversationId })
+  error.value = null // a failed send in a previous chat shouldn't bleed into this one
   selectedId.value = null
   forkPointId.value = null
   activeDraftKey.value = null
@@ -493,6 +496,7 @@ function pruneDraftForks() {
   if (draftForks.value.length !== before) persistDraftForks()
 }
 function activateDraftFork(key: string, forkFromNodeId: string) {
+  error.value = null // a failed send in a previous chat shouldn't bleed into this one
   drafting.value = false
   activeDraftKey.value = key
   forkPointId.value = forkFromNodeId // thread shows history up to here + fork divider
@@ -516,6 +520,7 @@ function deleteDraftFork(key: string) {
   const wasActive = activeDraftKey.value === key
   removeDraftFork(key)
   if (wasActive) {
+    error.value = null // a failed send in the deleted draft shouldn't bleed into the next chat
     forkPointId.value = null
     const tip = mostRecentChatTip(nodes.value, currentUserId.value)
     if (tip) { selectedId.value = tip; drafting.value = false }
