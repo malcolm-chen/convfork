@@ -90,6 +90,7 @@ export default defineNuxtConfig({
     // server/utils/lineage.ts) so it can be edited without touching code.
     // Bundled via Nitro's asset system rather than a raw fs path so it
     // survives `nuxt build` (the output dir doesn't mirror the source tree).
-    serverAssets: [{ baseName: 'prompts', dir: './server/assets/prompts' }],
+    // Resolved relative to serverDir (<root>/server), not the project root.
+    serverAssets: [{ baseName: 'prompts', dir: './assets/prompts' }],
   },
 })

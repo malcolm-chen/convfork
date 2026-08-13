@@ -2,10 +2,12 @@
 import type { TreeNode } from '~/composables/useConversation'
 
 // Anchored popover (not a modal — no backdrop dimming) for the "Share
-// branch" button: share everything in one click, or hand-pick which of your
-// own currently-private turns on this branch actually go public.
+// branch" button: share everything in one click, or hand-pick exactly which
+// of your own turns on this branch are shared — including turns already
+// shared, so this doubles as the way to selectively unshare too, not just
+// a one-way "add more" picker.
 const props = defineProps<{
-  nodes: TreeNode[] // currently-private own nodes on this branch, oldest → newest
+  nodes: TreeNode[] // your own turns on this branch (shared + private), oldest → newest
   memberNames: Record<string, string>
   busy?: boolean
 }>()
@@ -15,14 +17,18 @@ const emit = defineEmits<{
   (e: 'cancel'): void
 }>()
 
-// Defaults to nothing selected — clicking a turn adds it to the share set.
-// "Share all" (above) is the explicit one-click path for sharing everything;
-// this list is for picking specific turns, so it must start empty or every
-// click on a turn the user actually wants to share would uncheck it instead.
-const selected = ref<Set<string>>(new Set())
+// Defaults to whatever's already shared — checked reflects "is shared" at
+// open time, so the list looks like reality and you can toggle freely from
+// there: check a private turn to share it, uncheck a shared one to pull it
+// back. (Contrast with a "pick what's new" picker, which would have to start
+// empty — this one instead mirrors current state, since it can move either way.)
+function sharedIds(nodes: TreeNode[]) {
+  return new Set(nodes.filter((n) => n.visibility === 'shared').map((n) => n.id))
+}
+const selected = ref<Set<string>>(sharedIds(props.nodes))
 watch(
-  () => props.nodes.map((n) => n.id).join(','),
-  () => { selected.value = new Set() },
+  () => props.nodes.map((n) => `${n.id}:${n.visibility}`).join(','),
+  () => { selected.value = sharedIds(props.nodes) },
 )
 
 function toggle(id: string) {
@@ -38,7 +44,6 @@ function oneline(text: string, len = 46) {
 }
 
 function onConfirm() {
-  if (!selected.value.size) return
   emit('confirm', [...selected.value])
 }
 
@@ -68,7 +73,7 @@ onBeforeUnmount(() => {
       {{ busy ? 'Sharing…' : 'Share all' }}
     </UiButton>
 
-    <div class="divider"><span>Or select the turns you want to share</span></div>
+    <div class="divider"><span>Or choose exactly which turns are shared</span></div>
 
     <ul class="turnpicker nowheel">
       <li v-for="n in nodes" :key="n.id" class="prow" @click="toggle(n.id)">
@@ -79,12 +84,12 @@ onBeforeUnmount(() => {
         <UiAvatar v-else class="pavatar" :name="memberNames[n.author_id] ?? '?'" :color-key="n.author_id" :size="20" />
         <span class="psnippet">{{ oneline(n.content) }}</span>
       </li>
-      <li v-if="!nodes.length" class="pempty">Nothing left to share — this branch is already fully public.</li>
+      <li v-if="!nodes.length" class="pempty">No turns on this branch yet.</li>
     </ul>
 
     <div class="pactions">
       <UiButton variant="ghost" :disabled="busy" @click="emit('cancel')">Cancel</UiButton>
-      <UiButton variant="primary" :disabled="busy || !selected.size" @click="onConfirm">
+      <UiButton variant="primary" :disabled="busy" @click="onConfirm">
         {{ busy ? 'Working…' : 'Confirm' }}
       </UiButton>
     </div>

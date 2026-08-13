@@ -118,17 +118,24 @@ interface InheritedSource {
   messages: { id: string; role: 'user' | 'assistant'; authorName: string; content: string; created_at: string }[]
 }
 const inheritedGroups = ref<InheritedSource[]>([])
+// Guards against a stale response: e.g. the user opens a merge-forked chat,
+// then clicks "New Chat" before that fetch resolves. Without this, the old
+// fetch can land after the switch and repopulate inheritedGroups with the
+// previous chat's merge data.
+let inheritedGroupsRequestSeq = 0
 watch(
   effectiveMergedNodeId,
   async (id) => {
+    const requestSeq = ++inheritedGroupsRequestSeq
     if (!id) {
       inheritedGroups.value = []
       return
     }
     try {
-      inheritedGroups.value = (await $fetch<{ sources: InheritedSource[] }>(`/api/merge/${id}`)).sources
+      const sources = (await $fetch<{ sources: InheritedSource[] }>(`/api/merge/${id}`)).sources
+      if (requestSeq === inheritedGroupsRequestSeq) inheritedGroups.value = sources
     } catch {
-      inheritedGroups.value = []
+      if (requestSeq === inheritedGroupsRequestSeq) inheritedGroups.value = []
     }
   },
   { immediate: true },
@@ -634,6 +641,11 @@ const ownBranchNodes = computed(() => messages.value.filter((n) => n.author_id =
 const branchIsShared = computed(
   () => ownBranchNodes.value.length > 0 && ownBranchNodes.value.every((n) => n.visibility === 'shared'),
 )
+// Whether ANY (not necessarily all) of your own turns on this branch are
+// shared — without this, the button's label falls back to "Share branch" for
+// a branch you've already partly shared, reading as if nothing had gone out
+// yet (mirrors ChatSidebar's sharingStateOf/visBadge for the same chat).
+const branchIsPartlyShared = computed(() => ownBranchNodes.value.some((n) => n.visibility === 'shared'))
 // Clicking the header button either opens the share picker (nothing shared
 // yet) or, if the whole branch is already shared, unshares it in one step —
 // mirrors the button's own label.
@@ -655,24 +667,22 @@ function cancelShare() {
   pendingShare.value = false
 }
 
-// What the share picker offers: your own not-yet-shared nodes on this branch,
-// in conversation order.
+// "Share all" still only needs the not-yet-shared ones — already-shared own
+// nodes don't need re-sharing.
 const privateOwnBranchNodes = computed(() => ownBranchNodes.value.filter((n) => n.visibility === 'private'))
 
-// Shared by both "Share all" and picking specific turns — only the set of
-// ids differs (all of them, vs. whatever the user checked).
-async function shareNodes(nodes: TreeNode[]) {
+// The two directions a batch of own nodes can move — pure DB write + local
+// state patch, no busy/dialog lifecycle of their own, so confirmShareSelected
+// below can run both at once under one shared spinner/close instead of each
+// toggling pendingShare/sharePending independently out from under the other.
+// Returns whether the write succeeded, so a partial failure (e.g. the share
+// half works but the unshare half 500s) leaves the dialog open for retry
+// rather than closing over a half-applied change.
+async function shareBatch(nodes: TreeNode[]): Promise<boolean> {
   const ids = nodes.map((n) => n.id)
-  if (!ids.length) {
-    pendingShare.value = false
-    return
-  }
-  sharePending.value = true
-  logger.log('toggle_visibility', { node_ids: ids, to: 'shared', scope: 'branch' }, { conversationId, nodeId: selectedId.value! })
+  if (!ids.length) return true
   const { error } = await supabase.rpc('share_branch', { node_ids: ids })
-  sharePending.value = false
-  if (error) return
-  pendingShare.value = false
+  if (error) return false
   // Patch local state immediately — don't wait for the realtime round trip.
   for (const n of nodes) conv.upsert({ ...n, visibility: 'shared' })
   // Teammates weren't authorized to see these rows before this update, and
@@ -680,27 +690,62 @@ async function shareNodes(nodes: TreeNode[]) {
   // reveals a row to someone who couldn't select it beforehand — broadcast it
   // explicitly instead of waiting on an event that may never arrive for them.
   rt.broadcastReveal(ids)
+  return true
 }
-function confirmShareAll() {
-  shareNodes(privateOwnBranchNodes.value)
+async function unshareBatch(nodes: TreeNode[]): Promise<boolean> {
+  const ids = nodes.map((n) => n.id)
+  if (!ids.length) return true
+  const { error } = await supabase.from('nodes').update({ visibility: 'private' }).in('id', ids)
+  if (error) return false
+  // Patch local state immediately — don't wait for the realtime round trip
+  // (teammates never receive the shared→private UPDATE at all, since RLS
+  // filters it, which is why broadcastRetract exists for them below).
+  for (const n of nodes) conv.upsert({ ...n, visibility: 'private' })
+  rt.broadcastRetract(ids)
+  return true
 }
-function confirmShareSelected(ids: string[]) {
+
+async function confirmShareAll() {
+  const nodes = privateOwnBranchNodes.value
+  if (!nodes.length) {
+    pendingShare.value = false
+    return
+  }
+  sharePending.value = true
+  logger.log('toggle_visibility', { node_ids: nodes.map((n) => n.id), to: 'shared', scope: 'branch' }, { conversationId, nodeId: selectedId.value! })
+  const ok = await shareBatch(nodes)
+  sharePending.value = false
+  if (ok) pendingShare.value = false
+}
+
+// The picker shows every own turn (shared + private) pre-checked to match
+// its current visibility, so confirming can move turns either direction —
+// newly checked ones get shared, newly unchecked ones get unshared, all in
+// the one click (see ShareDialog.vue).
+async function confirmShareSelected(ids: string[]) {
   const picked = new Set(ids)
-  shareNodes(privateOwnBranchNodes.value.filter((n) => picked.has(n.id)))
+  const toShare = ownBranchNodes.value.filter((n) => picked.has(n.id) && n.visibility !== 'shared')
+  const toUnshare = ownBranchNodes.value.filter((n) => !picked.has(n.id) && n.visibility === 'shared')
+  if (!toShare.length && !toUnshare.length) {
+    pendingShare.value = false
+    return
+  }
+  sharePending.value = true
+  logger.log(
+    'toggle_visibility',
+    { node_ids: [...toShare, ...toUnshare].map((n) => n.id), to: 'mixed', scope: 'branch' },
+    { conversationId, nodeId: selectedId.value! },
+  )
+  const [sharedOk, unsharedOk] = await Promise.all([shareBatch(toShare), unshareBatch(toUnshare)])
+  sharePending.value = false
+  if (sharedOk && unsharedOk) pendingShare.value = false
 }
 
 async function unshareBranch() {
   const own = ownBranchNodes.value.filter((n) => n.visibility === 'shared')
-  const ids = own.map((n) => n.id)
-  if (!ids.length) return
-  logger.log('toggle_visibility', { node_ids: ids, to: 'private', scope: 'branch' }, { conversationId, nodeId: selectedId.value! })
-  const { error } = await supabase.from('nodes').update({ visibility: 'private' }).in('id', ids)
-  if (error) return
-  // Patch local state immediately — don't wait for the realtime round trip
-  // (teammates never receive the shared→private UPDATE at all, since RLS
-  // filters it, which is why broadcastRetract exists for them below).
-  for (const n of own) conv.upsert({ ...n, visibility: 'private' })
-  rt.broadcastRetract(ids)
+  if (!own.length) return
+  logger.log('toggle_visibility', { node_ids: own.map((n) => n.id), to: 'private', scope: 'branch' }, { conversationId, nodeId: selectedId.value! })
+  await unshareBatch(own)
 }
 
 // individual_llm only: mint a public, read-only link over the currently
@@ -885,14 +930,14 @@ async function signOut() {
                 v-if="selectiveSharing && selectedId && !drafting && ownBranchNodes.length"
                 variant="soft"
                 class="sharebtn"
-                :class="{ active: branchIsShared }"
+                :class="{ active: branchIsShared, partial: !branchIsShared && branchIsPartlyShared }"
                 @click.stop="onShareButtonClick"
               >
-                {{ branchIsShared ? 'Unshare branch' : 'Share branch' }}
+                {{ branchIsShared ? 'Unshare branch' : branchIsPartlyShared ? 'Partly shared' : 'Share branch' }}
               </UiButton>
               <ShareDialog
                 v-if="pendingShare"
-                :nodes="privateOwnBranchNodes"
+                :nodes="ownBranchNodes"
                 :member-names="memberNames"
                 :busy="sharePending"
                 @share-all="confirmShareAll"
@@ -1192,4 +1237,10 @@ async function signOut() {
 .sharebtn { flex: none; }
 .sharebtn.active { background: var(--accent); color: #fff; }
 .sharebtn.active:hover { background: var(--accent-soft); color: var(--accent); }
+/* Partly shared: distinct from both the untouched (private) and fully-shared
+   (active) states — otherwise "Partly shared" reads in the same neutral
+   styling as "Share branch", still looking like nothing has gone out yet.
+   Same warning tone as UiBadge's v-warning, since there's no shared --warning
+   CSS var to reference. */
+.sharebtn.partial { border-color: #8a6d3b; color: #8a6d3b; }
 </style>

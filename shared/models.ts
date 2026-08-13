@@ -22,6 +22,7 @@ export const MODEL_OPTIONS: ModelOption[] = [
   { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', provider: 'openai', supportsThinking: true },
   { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', provider: 'anthropic', supportsThinking: true },
   { id: 'claude-opus-4-7', label: 'Claude Opus 4.7', provider: 'anthropic', supportsThinking: true },
+  { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', provider: 'anthropic', supportsThinking: true },
 ]
 
 export const DEFAULT_MODEL_ID = 'gpt-5.5'

@@ -177,11 +177,15 @@ function relayout() {
       .filter((s) => s.parentId)
       .map((s) => {
         // Anchor the edge to the exact turn it was forked from (the child head's
-        // parent node). Every turn now renders its own handle, so any origin
-        // within the parent segment resolves; a parent re-parented past a hidden
-        // segment (origin not in it) falls back to the card's default handle.
+        // parent node). Only shared turns render their own handle now (TreeNode.vue
+        // hides private ones from the card entirely), so this only resolves when
+        // the origin turn is itself shared; a private origin, or a parent
+        // re-parented past a hidden segment (origin not in it at all), falls back
+        // to the card's default handle.
         const parent = segById.get(s.parentId as string)
-        const originInParent = parent?.nodes.some((n) => n.id === s.head.parent_id)
+        const originInParent = parent?.nodes.some(
+          (n) => n.id === s.head.parent_id && n.visibility === 'shared',
+        )
         const sourceHandle = originInParent ? (s.head.parent_id as string) : 'card-src'
         return {
           id: `${s.parentId}->${s.id}`,

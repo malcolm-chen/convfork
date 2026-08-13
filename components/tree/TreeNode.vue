@@ -65,6 +65,14 @@ const visTitle = computed(() =>
   allShared.value ? 'shared' : anyShared.value ? 'partly shared' : 'private',
 )
 
+// The turn list only ever shows turns actually shared with the team — a
+// partly-shared segment's still-private turns must never render here, even
+// to the segment's own author. turnNumberOf() below is still called against
+// the full segment (not this filtered list), so a shown turn keeps its true
+// original position (e.g. "8") instead of being renumbered among just the
+// visible ones.
+const visibleNodes = computed(() => props.segment.nodes.filter((n) => n.visibility === 'shared'))
+
 // Reactions anyone left anywhere on the trajectory; new ones attach to the
 // segment's earliest SHARED node rather than the head, because the head can
 // itself still be private (a segment renders as soon as ANY node in it is
@@ -237,7 +245,7 @@ function onDotDown(n: TreeNode, ev: PointerEvent) {
 
     <ol class="turnlist">
       <li
-        v-for="n in segment.nodes"
+        v-for="n in visibleNodes"
         :key="n.id"
         :class="{ forkable: canFork(n) && !mergeMode }"
         @click.stop="onTurnClick(n)"
@@ -556,7 +564,6 @@ function onDotDown(n: TreeNode, ev: PointerEvent) {
   white-space: nowrap;
   transition: color 0.12s ease;
 }
-
 /* Reactions sit directly on top of the author/time footer, read as one block. */
 .toolbar {
   display: flex;

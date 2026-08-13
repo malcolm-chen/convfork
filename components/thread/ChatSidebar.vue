@@ -76,10 +76,28 @@ function titleOf(seg: Segment<TreeNode>) {
   return clean.length > 48 ? clean.slice(0, 47) + '…' : clean || 'Untitled chat'
 }
 
-// A chat reads as "public" once every node in it has been shared — a private
-// node anywhere in the segment means it's still only visible to its author(s).
-function isPublic(seg: Segment<TreeNode>) {
-  return seg.nodes.every((n) => n.visibility === 'shared')
+// A chat's sharing state has three flavors, not two — collapsing "some but
+// not all turns shared" into "private" (the old isPublic() check) hid from
+// the author that they'd actually already shared part of the chat with the
+// team. Mirrors TreeNode.vue's allShared/anyShared split on the canvas.
+type SharingState = 'public' | 'partial' | 'private'
+function sharingStateOf(seg: Segment<TreeNode>): SharingState {
+  const total = seg.nodes.length
+  const shared = seg.nodes.filter((n) => n.visibility === 'shared').length
+  if (shared === 0) return 'private'
+  return shared === total ? 'public' : 'partial'
+}
+function visBadge(seg: Segment<TreeNode>) {
+  const state = sharingStateOf(seg)
+  if (state === 'public') return { variant: 'accent' as const, label: 'Public', title: 'Visible to your whole team' }
+  if (state === 'partial') {
+    return {
+      variant: 'warning' as const,
+      label: 'Partly shared',
+      title: 'Some turns are visible to your team — others are still private',
+    }
+  }
+  return { variant: 'neutral' as const, label: 'Private', title: 'Private to you' }
 }
 
 watch(
@@ -141,11 +159,11 @@ function onelineTime(iso: string) {
           <UiBadge v-if="c.head.is_fork_point" variant="neutral" class="forkedtag">Forked</UiBadge>
           <UiBadge
             v-if="showVisibility"
-            :variant="isPublic(c) ? 'accent' : 'warning'"
+            :variant="visBadge(c).variant"
             class="vistag"
-            :title="isPublic(c) ? 'Visible to your whole team' : 'Private to you'"
+            :title="visBadge(c).title"
           >
-            {{ isPublic(c) ? 'Public' : 'Private' }}
+            {{ visBadge(c).label }}
           </UiBadge>
         </div>
       </li>
