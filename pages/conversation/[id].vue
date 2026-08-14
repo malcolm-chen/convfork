@@ -771,21 +771,33 @@ function showToast(message: string, duration = 2200) {
 async function shareConversation() {
   if (!selectedId.value || shareLinkPending.value) return
   shareLinkPending.value = true
+  let url: string
   try {
     const { id } = await $fetch('/api/share/create', {
       method: 'POST',
       body: { conversationId, nodeId: selectedId.value },
     })
     logger.log('share_conversation', { node_id: selectedId.value, share_id: id }, { conversationId, nodeId: selectedId.value })
-    await navigator.clipboard.writeText(`${window.location.origin}/share/${id}`)
+    url = `${window.location.origin}/share/${id}`
+  } catch (err: any) {
+    alert(err?.data?.statusMessage || 'Could not create the share link — please retry.')
+    shareLinkPending.value = false
+    return
+  }
+  shareLinkPending.value = false
+
+  // Split from link creation on purpose: Safari drops clipboard-write
+  // permission across an intervening network await (the $fetch above), so
+  // this can reject even though the share link itself was created fine — a
+  // shared catch here would wrongly tell the user the share failed.
+  try {
+    await navigator.clipboard.writeText(url)
     shareLinkCopied.value = true
     if (shareLinkTimer) clearTimeout(shareLinkTimer)
     shareLinkTimer = setTimeout(() => { shareLinkCopied.value = false }, 2000)
     showToast('Conversation link copied to clipboard')
-  } catch (err: any) {
-    alert(err?.data?.statusMessage || 'Could not create the share link — please retry.')
-  } finally {
-    shareLinkPending.value = false
+  } catch {
+    window.prompt('Link created — copy it manually:', url)
   }
 }
 
@@ -925,6 +937,10 @@ async function signOut() {
               <AppIcon :name="shareLinkCopied ? 'check' : 'share'" :size="13" />
               {{ shareLinkCopied ? 'Link copied' : 'Share' }}
             </UiButton>
+            <!-- SideNav (with its own sign-out) is hidden in individual_llm
+                 mode (see the workspace grid below), so this is the only way
+                 out of the solo chat interface. -->
+            <UiButton v-if="individualLlm" variant="ghost" @click="signOut">Sign out</UiButton>
             <div class="sharewrap">
               <UiButton
                 v-if="selectiveSharing && selectedId && !drafting && ownBranchNodes.length"

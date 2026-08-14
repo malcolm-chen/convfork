@@ -1,9 +1,14 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type { H3Event } from 'h3'
 
-/** Synthetic auth email for a study userID (Supabase Auth still needs email). */
-export function studyEmail(userId: string): string {
-  return `${userId.toLowerCase()}@study.convfork.local`
+/**
+ * Synthetic auth email for a study userID (Supabase Auth still needs email).
+ * Keyed on userID + sessionID, not userID alone — auth.users.email is
+ * globally unique, and the same userID (e.g. "Alice") must be usable in
+ * multiple sessions as fully separate participants.
+ */
+export function studyEmail(userId: string, sessionId: string): string {
+  return `${userId.toLowerCase()}+${sessionId.toLowerCase()}@study.convfork.local`
 }
 
 const USER_ID_RE = /^[a-zA-Z0-9._-]{2,64}$/
@@ -31,19 +36,18 @@ export function validateSessionId(sessionId: string): string {
   return v
 }
 
-export type SharingCondition = 'default' | 'selective_sharing' | 'individual_llm'
+export type SharingCondition = 'selective_sharing' | 'individual_llm'
 
 export function validateSharingCondition(raw: unknown): SharingCondition {
   const v = typeof raw === 'string' ? raw.trim() : ''
-  if (v === 'default' || v === 'selective_sharing' || v === 'individual_llm') return v
+  if (v === 'selective_sharing' || v === 'individual_llm') return v
   throw createError({
     statusCode: 400,
-    statusMessage: 'condition must be "default", "selective_sharing", or "individual_llm"',
+    statusMessage: 'condition must be "selective_sharing" or "individual_llm"',
   })
 }
 
 export function conditionLabel(c: SharingCondition | string | null | undefined): string {
-  if (c === 'default') return 'Default (auto-public)'
   if (c === 'selective_sharing') return 'Selective sharing'
   if (c === 'individual_llm') return 'Individual LLM'
   return '—'

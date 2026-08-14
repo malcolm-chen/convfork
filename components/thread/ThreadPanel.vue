@@ -227,7 +227,7 @@ watch(
     <div v-if="isStreaming" class="turn assistant streaming">
       <span class="aiavatar">AI</span>
       <div class="turnbody">
-        <div class="meta">{{ modelLabel(streamingModel) ? `${modelLabel(streamingModel)} · Streaming…` : 'Streaming…' }}</div>
+        <div class="meta">{{ modelLabel(streamingModel) ? `${modelLabel(streamingModel)} (Streaming…)` : 'Streaming…' }}</div>
         <ThinkingBlock v-if="streamingReasoning" :reasoning="streamingReasoning" :auto-expand="!streamingText" />
         <ClientOnly>
           <div class="body md" v-html="renderMarkdown(streamingText)" />

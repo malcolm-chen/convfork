@@ -19,17 +19,6 @@ export default defineEventHandler(async (event) => {
   const condition = validateSharingCondition(body?.condition ?? 'selective_sharing')
 
   const admin = useSupabaseAdmin()
-  const email = studyEmail(userId)
-
-  // Reject duplicate study_user_id early (clearer than relying on unique index).
-  const { data: existing } = await admin
-    .from('users')
-    .select('id')
-    .eq('study_user_id', userId)
-    .maybeSingle()
-  if (existing) {
-    throw createError({ statusCode: 409, statusMessage: `userID "${userId}" already exists` })
-  }
 
   // 1. Find or create the team for this sessionID.
   let teamId: string
@@ -64,7 +53,24 @@ export default defineEventHandler(async (event) => {
     sharingCondition = created.sharing_condition as SharingCondition
   }
 
+  // Reject duplicate study_user_id early (clearer than relying on the unique
+  // index) — scoped to THIS session's team, since the same userID is allowed
+  // to exist in other sessions as a completely separate participant.
+  const { data: existing } = await admin
+    .from('users')
+    .select('id')
+    .eq('study_user_id', userId)
+    .eq('team_id', teamId)
+    .maybeSingle()
+  if (existing) {
+    throw createError({
+      statusCode: 409,
+      statusMessage: `userID "${userId}" already exists in session "${sessionId}"`,
+    })
+  }
+
   // 2. Auth user (password = sessionID so login is userID + sessionID).
+  const email = studyEmail(userId, sessionId)
   const { data: createdAuth, error: createErr } = await admin.auth.admin.createUser({
     email,
     password: sessionId,

@@ -138,7 +138,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
           <UiAvatar class="savatar" :name="authorName(s.authorId)" :color-key="s.authorId" :size="24" />
           <div class="smeta">
             <p class="stitlerow">{{ s.label }}</p>
-            <p class="ssub">{{ authorName(s.authorId) }} · {{ s.turnCount }} turn{{ s.turnCount === 1 ? '' : 's' }}</p>
+            <p class="ssub">{{ authorName(s.authorId) }} ({{ s.turnCount }} turn{{ s.turnCount === 1 ? '' : 's' }})</p>
           </div>
           <button
             class="sremove"

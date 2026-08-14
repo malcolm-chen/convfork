@@ -22,11 +22,15 @@ const { data: team, refresh: refreshTeam } = await useAsyncData('team', async ()
   if (!profile.value?.team_id) return null
   const { data } = await supabase
     .from('teams')
-    .select('name')
+    .select('name, sharing_condition')
     .eq('id', profile.value.team_id)
     .single()
   return data
 }, { watch: [() => profile.value?.team_id] })
+
+// Solo-chat study condition — there's no team to name a project for, so
+// creation skips straight past the naming step (see SideNav.vue).
+const individualLlm = computed(() => team.value?.sharing_condition === 'individual_llm')
 
 interface Member { id: string; display_name: string; role: string | null }
 const { data: members, refresh: refreshMembers } = await useAsyncData('members', async () => {
@@ -283,6 +287,7 @@ async function signOut() {
       :members="members ?? []"
       :conversations="convCards"
       :user-id="user?.id"
+      :individual-llm="individualLlm"
       @create="createConversation"
       @signout="signOut"
     />
@@ -325,8 +330,8 @@ async function signOut() {
             <h3>{{ c.title }}</h3>
             <p class="meta">
               {{ c.branchCount }} branch{{ c.branchCount === 1 ? '' : 'es' }}
-              · {{ c.nodeCount }} turn{{ c.nodeCount === 1 ? '' : 's' }}
-              · updated {{ timeAgo(c.updatedAt) }}
+              — {{ c.nodeCount }} turn{{ c.nodeCount === 1 ? '' : 's' }}
+              — updated {{ timeAgo(c.updatedAt) }}
             </p>
           </div>
           <span class="go">→</span>
@@ -347,7 +352,7 @@ async function signOut() {
             <NuxtLink :to="`/conversation/${n.conversation_id}`">
               <p class="btext">{{ snippet(n.content) }}</p>
               <p class="bmeta">
-                {{ convTitleById.get(n.conversation_id) }} · {{ authorName(n.author_id) }} · {{ timeAgo(n.created_at) }}
+                {{ convTitleById.get(n.conversation_id) }} — {{ authorName(n.author_id) }} — {{ timeAgo(n.created_at) }}
               </p>
             </NuxtLink>
           </li>
@@ -362,7 +367,7 @@ async function signOut() {
             <NuxtLink :to="`/conversation/${n.conversation_id}`">
               <p class="btext">📌 {{ snippet(n.content) }}</p>
               <p class="bmeta">
-                {{ convTitleById.get(n.conversation_id) }} · {{ authorName(n.author_id) }}
+                {{ convTitleById.get(n.conversation_id) }} — {{ authorName(n.author_id) }}
               </p>
             </NuxtLink>
           </li>

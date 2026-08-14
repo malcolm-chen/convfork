@@ -3,7 +3,7 @@ definePageMeta({
   // Bypass Supabase participant auth — this page uses the admin cookie.
 })
 
-type SharingCondition = 'default' | 'selective_sharing' | 'individual_llm'
+type SharingCondition = 'selective_sharing' | 'individual_llm'
 
 interface StudyUser {
   id: string
@@ -18,11 +18,6 @@ interface StudyUser {
 }
 
 const CONDITIONS: { value: SharingCondition; label: string; hint: string }[] = [
-  {
-    value: 'default',
-    label: 'Default',
-    hint: 'All conversations are public to the team. Users cannot change sharing.',
-  },
   {
     value: 'selective_sharing',
     label: 'Selective sharing',
@@ -43,7 +38,7 @@ const busy = ref(false)
 const userId = ref('')
 const sessionId = ref('')
 const displayName = ref('')
-const condition = ref<SharingCondition>('default')
+const condition = ref<SharingCondition>('selective_sharing')
 
 const { data: list, refresh: refreshList } = await useAsyncData(
   'admin-users',
@@ -87,7 +82,6 @@ const conditionHint = computed(() => {
 })
 
 function conditionLabel(c: SharingCondition | null) {
-  if (c === 'default') return 'Default'
   if (c === 'selective_sharing') return 'Selective sharing'
   if (c === 'individual_llm') return 'Individual LLM'
   return '—'
@@ -157,7 +151,7 @@ const bySession = computed(() => {
     <template v-else-if="authorized">
       <header>
         <div>
-          <h1>Admin · users & sessions</h1>
+          <h1>Admin: users & sessions</h1>
           <p class="hint">
             Users with the same Session ID are automatically placed on the same team.
             They sign in with User ID + Session ID. Condition is set per session.

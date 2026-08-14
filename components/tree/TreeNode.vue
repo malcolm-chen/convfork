@@ -200,6 +200,48 @@ function onDotDown(n: TreeNode, ev: PointerEvent) {
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', onUp)
 }
+
+// Full-message hover popover, teleported to <body> (see template) so it
+// always paints above every node on the canvas — vue-flow gives each
+// `.vue-flow__node` its own stacking context, so a z-index set from inside
+// one node can never beat a sibling node's box, only escaping the node's DOM
+// subtree entirely fixes that. Position is therefore computed in JS from the
+// hovered row's own screen rect instead of via CSS adjacency (`:hover +`),
+// and hide is debounced so the cursor can cross the gap from the row to the
+// popover without it vanishing mid-travel.
+const hoverTurn = ref<TreeNode | null>(null)
+const tipPos = reactive({ top: 0, left: 0 })
+const tipEl = ref<HTMLElement | null>(null)
+let hideTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearHideTimer() {
+  if (hideTimer != null) {
+    clearTimeout(hideTimer)
+    hideTimer = null
+  }
+}
+function scheduleHideTip() {
+  clearHideTimer()
+  hideTimer = setTimeout(() => { hoverTurn.value = null }, 150)
+}
+const TIP_WIDTH = 340
+function showTip(n: TreeNode, ev: MouseEvent) {
+  clearHideTimer()
+  hoverTurn.value = n
+  const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect()
+  const gap = 14
+  const fitsRight = rect.right + gap + TIP_WIDTH <= window.innerWidth - 12
+  tipPos.left = fitsRight ? rect.right + gap : Math.max(12, rect.left - gap - TIP_WIDTH)
+  const centerY = rect.top + rect.height / 2
+  tipPos.top = centerY
+  nextTick(() => {
+    const el = tipEl.value
+    if (!el || hoverTurn.value !== n) return
+    const h = el.offsetHeight
+    const maxTop = Math.max(12, window.innerHeight - h - 12)
+    tipPos.top = Math.min(Math.max(centerY - h / 2, 12), maxTop)
+  })
+}
 </script>
 
 <template>
@@ -249,6 +291,9 @@ function onDotDown(n: TreeNode, ev: PointerEvent) {
         :key="n.id"
         :class="{ forkable: canFork(n) && !mergeMode }"
         @click.stop="onTurnClick(n)"
+        @mouseenter="showTip(n, $event)"
+        @mouseleave="scheduleHideTip"
+        @wheel="scheduleHideTip"
       >
         <!-- Who said it: the agent, or the teammate who wrote the turn. -->
         <span v-if="n.role === 'assistant'" class="tavatar ai" title="Agent">AI</span>
@@ -261,15 +306,6 @@ function onDotDown(n: TreeNode, ev: PointerEvent) {
         />
         <span class="tnum">{{ turnNumberOf(segment, n.id) }}</span>
         <span class="tsnippet">{{ oneline(n.content, 44) }}</span>
-        <div class="turntip nodrag nowheel" role="tooltip">
-          <div class="turntipcard">
-            <ClientOnly v-if="n.role === 'assistant'">
-              <div class="md" v-html="renderMarkdown(n.content)" />
-              <template #fallback>{{ n.content }}</template>
-            </ClientOnly>
-            <template v-else>{{ n.content }}</template>
-          </div>
-        </div>
         <!-- Source anchor co-located with this turn's dot. -->
         <Handle :id="n.id" type="source" :position="Position.Right" :style="turnHandleStyle" />
         <span class="tdot nodrag" title="Fork from here" @pointerdown="onDotDown(n, $event)" @click.stop />
@@ -299,6 +335,41 @@ function onDotDown(n: TreeNode, ev: PointerEvent) {
          parent re-parented past a hidden segment). -->
     <Handle id="card-src" type="source" :position="Position.Right" class="cardhandle" />
   </div>
+
+  <!-- Teleported to <body> so this always paints above every canvas node,
+       instead of being trapped inside this node's own vue-flow stacking
+       context (see showTip() above). -->
+  <Teleport to="body">
+    <div
+      v-if="hoverTurn"
+      ref="tipEl"
+      class="turntip-portal"
+      role="tooltip"
+      :style="{ top: tipPos.top + 'px', left: tipPos.left + 'px' }"
+      @mouseenter="clearHideTimer"
+      @mouseleave="scheduleHideTip"
+    >
+      <div class="turntiphdr">
+        <span v-if="hoverTurn.role === 'assistant'" class="tavatar ai" title="Agent">AI</span>
+        <UiAvatar
+          v-else
+          class="tavatar"
+          :name="memberNames[hoverTurn.author_id] ?? '?'"
+          :color-key="hoverTurn.author_id"
+          :size="16"
+        />
+        <span class="turntiplabel">
+          {{ hoverTurn.role === 'assistant' ? 'Agent' : memberNames[hoverTurn.author_id] ?? 'Unknown' }}
+          (Turn {{ turnNumberOf(segment, hoverTurn.id) }})
+        </span>
+      </div>
+      <ClientOnly v-if="hoverTurn.role === 'assistant'">
+        <div class="md" v-html="renderMarkdown(hoverTurn.content)" />
+        <template #fallback>{{ hoverTurn.content }}</template>
+      </ClientOnly>
+      <template v-else>{{ hoverTurn.content }}</template>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -419,83 +490,89 @@ function onDotDown(n: TreeNode, ev: PointerEvent) {
 /* Full-message hover popover for a numbered row — truncated in the compact
    turn list, so hovering reveals the whole thing instead of relying on a
    plain browser tooltip.
-   .turntip itself is an invisible hit-box, not the visible card — it carries
-   the gap to the card as padding (not a positional offset) plus generous
-   slack on every side, so the whole path from the row to the card is one
-   continuous hoverable region. A positional gap here was the bug: the
-   instant the cursor drifted a couple of pixels off that empty strip, the
-   :hover match broke and the popover vanished before the cursor ever reached
-   it. */
-.turntip {
-  display: none;
-  position: absolute;
-  z-index: 50;
-  top: 50%;
-  left: 100%;
-  transform: translateY(-50%);
-  padding: 28px 24px 28px 10px;
-}
-.turntipcard {
-  width: 260px;
-  max-height: 220px;
+   Teleported to <body> (see the template's <Teleport> block) and positioned
+   in JS from the hovered row's screen rect: every vue-flow node is its own
+   stacking context, so a z-index set here would only ever win against its
+   own card's children, never against a sibling node's box. Escaping the
+   node's DOM subtree entirely is the only way to guarantee this always
+   paints above the canvas. Hiding is debounced from JS (showTip/scheduleHideTip)
+   instead of relying on CSS `:hover` adjacency, since the popover is no
+   longer a DOM sibling of the row that triggers it. */
+.turntip-portal {
+  position: fixed;
+  z-index: 150;
+  width: 340px;
+  max-height: 340px;
   overflow-y: auto;
-  padding: 10px 12px;
+  padding: 14px 16px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--card);
-  box-shadow: 0 10px 28px rgba(20, 20, 30, 0.18);
+  box-shadow: 0 16px 40px rgba(20, 20, 30, 0.24);
   color: var(--ink);
-  font-size: 12px;
+  font-size: 13.5px;
   font-weight: 400;
-  line-height: 1.55;
+  line-height: 1.6;
   text-align: left;
   white-space: pre-wrap;
   word-break: break-word;
   cursor: auto;
 }
+.turntiphdr {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -2px 0 9px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.turntiplabel {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
 /* Markdown typography for assistant turns (mirrors ThreadPanel.vue's .body.md) —
    v-html content isn't scoped, so it must be reached with :deep(). */
-.turntipcard .md { white-space: normal; }
-.turntipcard .md :deep(> *:first-child) { margin-top: 0; }
-.turntipcard .md :deep(> *:last-child) { margin-bottom: 0; }
-.turntipcard .md :deep(p) { margin: 0 0 0.6em; }
-.turntipcard .md :deep(h1),
-.turntipcard .md :deep(h2),
-.turntipcard .md :deep(h3),
-.turntipcard .md :deep(h4) { margin: 0.8em 0 0.4em; line-height: 1.3; font-weight: 600; }
-.turntipcard .md :deep(ul),
-.turntipcard .md :deep(ol) { margin: 0 0 0.6em; padding-left: 1.3em; }
-.turntipcard .md :deep(li) { margin: 0.15em 0; }
-.turntipcard .md :deep(a) { color: var(--accent); text-decoration: underline; }
-.turntipcard .md :deep(strong) { font-weight: 600; }
-.turntipcard .md :deep(code) {
+.turntip-portal .md { white-space: normal; }
+.turntip-portal .md :deep(> *:first-child) { margin-top: 0; }
+.turntip-portal .md :deep(> *:last-child) { margin-bottom: 0; }
+.turntip-portal .md :deep(p) { margin: 0 0 0.6em; }
+.turntip-portal .md :deep(h1),
+.turntip-portal .md :deep(h2),
+.turntip-portal .md :deep(h3),
+.turntip-portal .md :deep(h4) { margin: 0.8em 0 0.4em; line-height: 1.3; font-weight: 600; }
+.turntip-portal .md :deep(ul),
+.turntip-portal .md :deep(ol) { margin: 0 0 0.6em; padding-left: 1.3em; }
+.turntip-portal .md :deep(li) { margin: 0.15em 0; }
+.turntip-portal .md :deep(a) { color: var(--accent); text-decoration: underline; }
+.turntip-portal .md :deep(strong) { font-weight: 600; }
+.turntip-portal .md :deep(code) {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.9em;
   background: rgba(0, 0, 0, 0.06);
   padding: 0.1em 0.32em;
   border-radius: 5px;
 }
-.turntipcard .md :deep(pre) {
+.turntip-portal .md :deep(pre) {
   margin: 0 0 0.6em;
   padding: 9px 11px;
   background: #1e1e24;
   color: #f1efe9;
   border-radius: 8px;
   overflow-x: auto;
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.5;
 }
-.turntipcard .md :deep(pre code) { background: none; padding: 0; font-size: inherit; color: inherit; }
-.turntipcard .md :deep(blockquote) {
+.turntip-portal .md :deep(pre code) { background: none; padding: 0; font-size: inherit; color: inherit; }
+.turntip-portal .md :deep(blockquote) {
   margin: 0 0 0.6em;
   padding: 0.1em 0 0.1em 0.8em;
   border-left: 3px solid var(--line);
   color: var(--muted);
 }
-.turntipcard .md :deep(hr) { border: none; border-top: 1px solid var(--line); margin: 0.8em 0; }
-.turnlist li:hover .turntip {
-  display: block;
-}
+.turntip-portal .md :deep(hr) { border: none; border-top: 1px solid var(--line); margin: 0.8em 0; }
 
 /* No more single dot for the whole card — geometry only, not shown. */
 .cardhandle { opacity: 0; pointer-events: none; }

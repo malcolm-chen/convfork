@@ -50,10 +50,10 @@ export default defineEventHandler(async (event) => {
 
   const admin = useSupabaseAdmin()
 
-  // conversation + caller team check (+ study sharing condition)
+  // conversation + caller team check
   const { data: convo } = await admin
     .from('conversations')
-    .select('id, team_id, teams(sharing_condition)')
+    .select('id, team_id')
     .eq('id', body.conversationId)
     .single()
   if (!convo) throw createError({ statusCode: 404, statusMessage: 'conversation not found' })
@@ -67,10 +67,10 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 403, statusMessage: 'not a member of this team' })
   }
 
-  const teamRow = Array.isArray(convo.teams) ? convo.teams[0] : convo.teams
-  const sharingCondition = (teamRow as { sharing_condition?: string } | null)?.sharing_condition
-  // default → auto-public; selective_sharing → private until the author shares
-  const visibility = sharingCondition === 'default' ? 'shared' : 'private'
+  // Both remaining study conditions start nodes private (selective_sharing:
+  // the author opts in later; individual_llm: sharing is disabled entirely,
+  // enforced in the DB by enforce_team_sharing_condition()).
+  const visibility = 'private'
 
   // parent validation + fork detection
   let isForkFromOther = false

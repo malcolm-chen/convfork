@@ -12,6 +12,9 @@ const props = defineProps<{
   conversations: ConvoItem[]
   activeId?: string | null
   userId?: string
+  // Solo-chat study condition: there's no team to share a named project
+  // with, so creation skips the naming step entirely (see openCreate below).
+  individualLlm?: boolean
 }>()
 const emit = defineEmits<{
   (e: 'create', title: string): void
@@ -56,10 +59,18 @@ function submitRename() {
 }
 
 function openCreate() {
+  if (props.individualLlm) {
+    emit('create', '')
+    return
+  }
   creating.value = true
   nextTick(() => newTitleInput.value?.focus())
 }
 function toggleCreate() {
+  if (props.individualLlm) {
+    openCreate()
+    return
+  }
   creating.value ? (creating.value = false) : openCreate()
 }
 function submit() {
@@ -82,7 +93,7 @@ defineExpose({ openCreate })
         <li v-for="m in filteredMembers" :key="m.id">
           <UiAvatar :name="m.display_name" :color-key="m.id" :size="26" :online="m.id === userId" />
           <span class="mname">
-            {{ m.display_name }}<span v-if="m.id === userId" class="you"> · you</span>
+            {{ m.display_name }}<span v-if="m.id === userId" class="you"> (you)</span>
           </span>
           <span v-if="m.role" class="mrole">{{ m.role }}</span>
         </li>
