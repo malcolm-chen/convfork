@@ -139,6 +139,12 @@ const ICONS: Record<string, FillIcon | StrokeIcon> = {
       '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="12" r="3"/>' +
       '<path d="M6 9v3a3 3 0 0 0 3 3h1"/><path d="M15 12h-5"/>',
   },
+  // Plain pencil (edit) — distinct from `compose`'s pencil-in-square.
+  pencil: {
+    kind: 'stroke',
+    vb: '0 0 24 24',
+    shapes: '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
+  },
 }
 
 const icon = computed(() => ICONS[props.name])

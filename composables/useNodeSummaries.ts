@@ -1,16 +1,19 @@
-// LLM-generated titles for tree cards (ChatGPT-sidebar style), cached so we
-// only call the model once per distinct trajectory content. Cache is keyed by a
-// hash of the transcript, kept in memory and mirrored to localStorage so titles
-// survive reloads and don't re-cost tokens.
+// LLM-generated titles for tree cards (ChatGPT-sidebar style). The result is
+// persisted server-side onto the segment's head node (nodes.title, see
+// server/api/nodes/rename.post.ts / useNodeTitle.ts) and synced to every team
+// member over realtime — this composable's own cache is just an in-session,
+// in-memory de-dupe (keyed by a hash of the transcript) so opening the same
+// tree twice, or two team members viewing at once, doesn't fan out duplicate
+// LLM calls for content nothing has actually changed.
 
 type Entry = { text: string; status: 'loading' | 'done' | 'error' }
 
 const cache = reactive(new Map<string, Entry>())
-const LS_KEY = 'convfork:summaries:v1'
-let hydrated = false
 let inflight = 0
 
-// Small, fast, well-distributed string hash (cyrb53) — stable across reloads.
+// Small, fast, well-distributed string hash (cyrb53) — stable across reloads,
+// also stored as nodes.title_hash so a client can tell an existing DB title
+// apart from stale (segment has grown since it was generated).
 function hash(str: string): string {
   let h1 = 0xdeadbeef
   let h2 = 0x41c6ce57
@@ -24,42 +27,14 @@ function hash(str: string): string {
   return (h2 >>> 0).toString(16) + (h1 >>> 0).toString(16)
 }
 
-function hydrate() {
-  if (hydrated || !import.meta.client) return
-  hydrated = true
-  try {
-    const raw = localStorage.getItem(LS_KEY)
-    if (raw) {
-      for (const [k, v] of Object.entries(JSON.parse(raw) as Record<string, string>)) {
-        cache.set(k, { text: v, status: 'done' })
-      }
-    }
-  } catch {
-    /* corrupt / unavailable storage — start empty */
-  }
-}
-
-function persist() {
-  if (!import.meta.client) return
-  try {
-    const done: Record<string, string> = {}
-    for (const [k, v] of cache) if (v.status === 'done') done[k] = v.text
-    localStorage.setItem(LS_KEY, JSON.stringify(done))
-  } catch {
-    /* quota / unavailable — the in-memory cache still works this session */
-  }
-}
-
 export function useNodeSummaries() {
-  hydrate()
-
   const keyFor = (transcript: string) => hash(transcript)
 
   // Kick off a summary for this transcript if we don't already have one
-  // (or one in flight). Idempotent — safe to call on every render. `model`
-  // should be whichever backbone the trajectory itself already used, so the
-  // summary call stays on a provider the team actually has configured
-  // instead of silently defaulting to a fixed backbone.
+  // (or one in flight) cached THIS session. Idempotent — safe to call on
+  // every render. `model` should be whichever backbone the trajectory itself
+  // already used, so the summary call stays on a provider the team actually
+  // has configured instead of silently defaulting to a fixed backbone.
   function request(transcript: string, model?: string | null) {
     if (!import.meta.client) return
     const key = keyFor(transcript)
@@ -74,10 +49,7 @@ export function useNodeSummaries() {
     cache.set(key, { text: '', status: 'loading' })
     inflight++
     $fetch<{ summary: string }>('/api/summarize', { method: 'POST', body: { text: transcript.slice(0, 6000), model } })
-      .then((r) => {
-        cache.set(key, { text: r.summary, status: 'done' })
-        persist()
-      })
+      .then((r) => cache.set(key, { text: r.summary, status: 'done' }))
       .catch(() => cache.set(key, { text: '', status: 'error' }))
       .finally(() => { inflight-- })
   }

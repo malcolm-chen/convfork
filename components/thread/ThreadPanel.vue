@@ -35,7 +35,13 @@ const props = defineProps<{
   // (see server/api/merge/[id].get.ts), shown above everything else with
   // one divider per source and a closing "End of forked context" divider.
   inheritedGroups?: InheritedGroup[]
+  // The one user message (if any) that may be edited — the unbranched tip of
+  // the live branch. Computed by the page (it alone knows the full tree), so
+  // this component never has to guess at forks/follow-ups outside `messages`.
+  editableUserNodeId?: string | null
 }>()
+
+const emit = defineEmits<{ (e: 'edit-message', payload: { id: string; text: string }): void }>()
 
 // The group's own "primary author" label for its divider — the first human
 // speaker in that source trajectory (falls back to the group title alone if
@@ -92,6 +98,36 @@ async function copyContent(id: string, content: string) {
   copiedTimer = setTimeout(() => {
     copiedId.value = null
   }, 1500)
+}
+
+// Inline "Edit" on the editable tip user message — same id-gated single-row
+// pattern as copiedId above, plus a draft textarea and autofocus-on-open.
+const editingId = ref<string | null>(null)
+const editDraft = ref('')
+let editEl: HTMLTextAreaElement | null = null
+function setEditEl(el: unknown) {
+  editEl = el as HTMLTextAreaElement | null
+}
+function startEdit(m: TreeNode) {
+  editingId.value = m.id
+  editDraft.value = m.content
+  nextTick(() => {
+    editEl?.focus()
+    editEl?.select()
+  })
+}
+function cancelEdit() {
+  editingId.value = null
+}
+function submitEdit() {
+  // Editing while the reply is still streaming in is allowed — it cancels the
+  // in-flight generation and regenerates from the edit (useLLMStream aborts
+  // the older send() itself; see its comment).
+  const id = editingId.value
+  const text = editDraft.value.trim()
+  if (!id || !text) return
+  editingId.value = null
+  emit('edit-message', { id, text })
 }
 
 // Keep the newest message in view as the thread grows or tokens stream in.
@@ -217,9 +253,43 @@ watch(
         <UiAvatar class="mavatar" :name="authorName(m)" :color-key="m.author_id" :size="28" />
         <div class="bubble">
           <div class="meta">{{ authorName(m) }}</div>
-          <AttachmentList :attachments="attachmentsOf(m)" :base-path="attachmentBasePath" />
-          <div v-if="m.content" class="body">{{ m.content }}</div>
-          <div class="time">{{ turnTime(m) }}</div>
+          <template v-if="editingId === m.id">
+            <textarea
+              :ref="setEditEl"
+              v-model="editDraft"
+              class="editbox"
+              @keydown.enter.exact.prevent="submitEdit"
+              @keyup.esc="cancelEdit"
+            />
+            <div class="editactions">
+              <button type="button" class="editcancel" @click="cancelEdit">Cancel</button>
+              <button
+                type="button"
+                class="editsave"
+                :disabled="!editDraft.trim()"
+                :title="isStreaming ? 'Stops the current response and regenerates from your edit' : undefined"
+                @click="submitEdit"
+              >
+                Send
+              </button>
+            </div>
+          </template>
+          <template v-else>
+            <AttachmentList :attachments="attachmentsOf(m)" :base-path="attachmentBasePath" />
+            <div v-if="m.content" class="body">{{ m.content }}</div>
+            <div class="bubblefoot">
+              <div class="time">{{ turnTime(m) }}</div>
+              <button
+                v-if="m.id === editableUserNodeId"
+                type="button"
+                class="editbtn"
+                title="Edit & regenerate"
+                @click="startEdit(m)"
+              >
+                <AppIcon name="pencil" :size="12" />
+              </button>
+            </div>
+          </template>
         </div>
       </div>
     </template>
@@ -324,6 +394,53 @@ watch(
   cursor: pointer;
 }
 .copybtn:hover { background: var(--accent-soft); color: var(--ink); }
+
+.bubblefoot { display: flex; align-items: center; justify-content: flex-end; gap: 4px; margin-top: 4px; }
+.bubblefoot .time { margin-top: 0; }
+.editbtn {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+}
+.editbtn:hover { background: rgba(255, 255, 255, 0.18); color: #fff; }
+
+.editbox {
+  width: min(320px, 60vw);
+  min-height: 44px;
+  resize: vertical;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.editbox:focus { outline: 2px solid rgba(255, 255, 255, 0.6); outline-offset: 1px; }
+.editactions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+.editcancel,
+.editsave {
+  padding: 4px 10px;
+  border: none;
+  border-radius: 7px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.editcancel { background: rgba(255, 255, 255, 0.18); color: #fff; }
+.editcancel:hover { background: rgba(255, 255, 255, 0.28); }
+.editsave { background: #fff; color: var(--accent); }
+.editsave:hover { background: rgba(255, 255, 255, 0.9); }
+.editsave:disabled { opacity: 0.5; cursor: default; }
 .caret { display: inline-block; margin-left: 1px; animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 

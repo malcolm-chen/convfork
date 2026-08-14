@@ -3,6 +3,7 @@ import type { TreeNode } from '~/composables/useConversation'
 import type { AttachmentRef } from '~/composables/useFileUpload'
 import type { ConceptTag } from '~/composables/useConcepts'
 import { segmentize, sharedOrder, sharedSegments, turnNumberOf } from '~/composables/useSegments'
+import { DEFAULT_MODEL_ID } from '#shared/models'
 
 // Without this, navigating between two conversation pages (e.g. forking,
 // which lands you on `/conversation/<new-id>`) reuses this component instance
@@ -48,6 +49,28 @@ const activeDraftKey = ref<string | null>(null)
 const DRAFTS_KEY = `convfork:draftForks:${conversationId}`
 const currentUserId = computed(() => user.value?.id ?? '')
 const messages = computed(() => (drafting.value ? [] : conv.lineageOf(selectedId.value)))
+
+// The single user message (if any) an "Edit" button may appear on: your own,
+// last-in-branch, and not already forked below — anything else makes "revert
+// and regenerate" ambiguous about what exactly should be discarded. Shown
+// even while the reply is still streaming in (its node doesn't exist in
+// conv yet, so it simply isn't counted as a child below) — ThreadPanel just
+// disables the actual Send button until isStreaming clears, so opening the
+// editor to compose an edit doesn't have to wait on the in-flight reply.
+const editableUserNodeId = computed(() => {
+  const msgs = messages.value
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i]
+    if (m.role !== 'user') continue
+    if (m.author_id !== currentUserId.value) return null
+    const children = conv.childrenOf(m.id)
+    if (children.length > 1) return null
+    const onlyChild = children[0]
+    if (onlyChild && conv.childrenOf(onlyChild.id).length > 0) return null
+    return m.id
+  }
+  return null
+})
 
 // ── Merge mode: select 2+ conversation nodes (segments) on this project's
 // canvas, generate a merged node over them. See composables/useMergeMode.ts. ──
@@ -453,6 +476,9 @@ async function onSubmit(payload: { text: string; model: string; thinking?: strin
         model: null,
         parent_merged_node_id: materializedMergeDraft,
         created_at: new Date().toISOString(),
+        title: null,
+        title_manual: false,
+        title_hash: null,
       })
       for (const a of payload.attachments ?? []) {
         conv.addAttachment({
@@ -474,6 +500,11 @@ async function onSubmit(payload: { text: string; model: string; thinking?: strin
       refreshConvos() // bump this project to the top of the activity-ordered list
     },
   })
+  // Superseded by an edit to this very message while it was still streaming
+  // (useLLMStream aborts the older send() — see its comment) — that edit's
+  // own tail already owns selectedId/fetchLineage for the replacement node,
+  // so there's nothing left here to finish.
+  if (!conv.nodesById.has(r.userNodeId)) return
   // Pull the new pair immediately — selecting before the realtime INSERT
   // arrives would otherwise blank the thread panel for a beat. This also
   // overwrites the optimistic user node above with the server-confirmed one.
@@ -483,6 +514,62 @@ async function onSubmit(payload: { text: string; model: string; thinking?: strin
   // resolving correctly without this ref.
   if (materializedMergeDraft) activeMergedNodeId.value = null
   drafting.value = false
+  selectedId.value = r.assistantNodeId
+}
+
+// Edit a past user message (ThreadPanel's Edit button, gated to
+// editableUserNodeId above): the old message + the AI reply it produced
+// (nodes are immutable, so this can never be an UPDATE — see chat.post.ts)
+// are purged server-side and a fresh turn is generated from the same parent.
+async function onEditMessage(payload: { id: string; text: string }) {
+  const node = conv.nodesById.get(payload.id)
+  const text = payload.text.trim()
+  if (!node || node.role !== 'user' || node.author_id !== currentUserId.value || !text) return
+
+  const children = conv.childrenOf(node.id)
+  if (children.length > 1) return // multiple branches already exist; ambiguous what to discard
+  const assistantChild = children[0]
+  if (assistantChild && conv.childrenOf(assistantChild.id).length > 0) return // reply has its own follow-ups
+
+  const parentNodeId = node.parent_id
+  const model = assistantChild?.model ?? DEFAULT_MODEL_ID
+  const idsToDelete = assistantChild ? [node.id, assistantChild.id] : [node.id]
+
+  logger.log('edit_message', { node_id: node.id, len: text.length }, { conversationId, nodeId: node.id })
+  streamingModel.value = model
+  const r = await send({
+    conversationId,
+    parentNodeId,
+    userText: text,
+    model,
+    editNodeId: node.id,
+    onUserNodeId: (userNodeId) => {
+      conv.removeNodes(idsToDelete)
+      conv.upsert({
+        id: userNodeId,
+        conversation_id: conversationId,
+        parent_id: parentNodeId,
+        author_id: currentUserId.value,
+        role: 'user',
+        content: text,
+        reasoning: null,
+        visibility: 'private',
+        is_fork_point: node.is_fork_point,
+        model: null,
+        parent_merged_node_id: node.parent_merged_node_id,
+        created_at: new Date().toISOString(),
+        title: null,
+        title_manual: false,
+        title_hash: null,
+      })
+      selectedId.value = userNodeId
+    },
+  })
+  // Superseded by yet another edit before this one's round trip finished —
+  // its tail already owns selectedId/fetchLineage (see onSubmit's identical
+  // guard for the fuller explanation).
+  if (!conv.nodesById.has(r.userNodeId)) return
+  await conv.fetchLineage(r.assistantNodeId)
   selectedId.value = r.assistantNodeId
 }
 
@@ -976,6 +1063,8 @@ async function signOut() {
           :error="error"
           :drafting="drafting"
           :inherited-groups="inheritedGroups ?? []"
+          :editable-user-node-id="editableUserNodeId"
+          @edit-message="onEditMessage"
         />
         <Composer
           :conversation-id="conversationId"

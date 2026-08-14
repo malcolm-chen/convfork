@@ -18,6 +18,12 @@ export interface TreeNode {
   // merged context node — see server/api/chat.post.ts / MergedNodeCard.vue.
   parent_merged_node_id: string | null
   created_at: string
+  // Canvas card headline (components/tree/TreeNode.vue), meaningful only on a
+  // segment's head node (composables/useSegments.ts) — auto-generated or set
+  // by a user's rename, see server/api/nodes/rename.post.ts.
+  title: string | null
+  title_manual: boolean
+  title_hash: string | null
 }
 
 export interface Reaction {

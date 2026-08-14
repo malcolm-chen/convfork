@@ -29,6 +29,13 @@ interface ChatBody {
   // segment (conversation node) forked from a merged context node — see the
   // "Fork" action on a merged node card, components/tree/MergedNodeCard.vue.
   mergedNodeId?: string
+  // Set when this send replaces a previously-sent user message ("Edit" on a
+  // message bubble, ThreadPanel.vue). Nodes are immutable (see
+  // enforce_node_immutability in the migrations), so an edit can never UPDATE
+  // the old row — instead we purge the edited node + the AI reply it produced
+  // (and anything built on top, though the client only offers this on an
+  // unbranched tip) and insert a fresh user node under the same parent below.
+  editNodeId?: string
 }
 
 export default defineEventHandler(async (event) => {
@@ -71,6 +78,61 @@ export default defineEventHandler(async (event) => {
   // the author opts in later; individual_llm: sharing is disabled entirely,
   // enforced in the DB by enforce_team_sharing_condition()).
   const visibility = 'private'
+
+  // Editing a past message: verify ownership, verify it's still an unbranched
+  // tip (no sibling forks, and its reply has no follow-ups of its own — the
+  // client hides the Edit affordance in every other case, but never trust
+  // that alone), then purge the old branch. The rebuilt turn below is then
+  // inserted as an ordinary continuation of the edited node's own parent.
+  let carriedTitle: { title: string | null; title_manual: boolean; title_hash: string | null } | null = null
+  if (body.editNodeId) {
+    const { data: target } = await admin
+      .from('nodes')
+      .select('id, conversation_id, author_id, role, parent_id, parent_merged_node_id, is_fork_point, title, title_manual, title_hash')
+      .eq('id', body.editNodeId)
+      .single()
+    if (!target || target.conversation_id !== body.conversationId || target.role !== 'user' || target.author_id !== user.id) {
+      throw createError({ statusCode: 403, statusMessage: 'cannot edit this message' })
+    }
+    const { data: children } = await admin.from('nodes').select('id').eq('parent_id', target.id)
+    if ((children?.length ?? 0) > 1) {
+      throw createError({ statusCode: 409, statusMessage: 'this message has multiple branches; cannot edit' })
+    }
+    const onlyChildId = children?.[0]?.id
+    if (onlyChildId) {
+      const { count: grandchildCount } = await admin
+        .from('nodes')
+        .select('id', { count: 'exact', head: true })
+        .eq('parent_id', onlyChildId)
+      if ((grandchildCount ?? 0) > 0) {
+        throw createError({ statusCode: 409, statusMessage: 'this reply has follow-up messages; cannot edit' })
+      }
+    }
+
+    // If the edited message was itself this branch's segment head (see
+    // useSegments.ts's isStart), carry its canvas title over to the
+    // replacement node — otherwise editing a branch's opening message would
+    // silently wipe out its name.
+    let isHead = !target.parent_id || target.is_fork_point
+    if (!isHead && target.parent_id) {
+      const { data: siblings } = await admin.from('nodes').select('id, is_fork_point').eq('parent_id', target.parent_id)
+      isHead = (siblings ?? []).filter((s) => !s.is_fork_point).length > 1
+    }
+    if (isHead) {
+      carriedTitle = { title: target.title, title_manual: target.title_manual, title_hash: target.title_hash }
+    }
+
+    const idsToDelete = await collectDescendantIds(admin, body.conversationId, [target.id])
+    await purgeNodesByIds(admin, idsToDelete)
+
+    // Continue from where the edited message was — a root edit re-attaches
+    // to the merged node it was forked from, if any, unless the client
+    // already specified one explicitly.
+    body.parentNodeId = target.parent_id
+    if (!target.parent_id && target.parent_merged_node_id && !body.mergedNodeId) {
+      body.mergedNodeId = target.parent_merged_node_id
+    }
+  }
 
   // parent validation + fork detection
   let isForkFromOther = false
@@ -134,6 +196,7 @@ export default defineEventHandler(async (event) => {
       visibility,
       is_fork_point: isForkPoint,
       parent_merged_node_id: mergedNodeId,
+      ...(carriedTitle ?? {}),
     },
     { onConflict: 'id' },
   )
@@ -195,26 +258,31 @@ export default defineEventHandler(async (event) => {
         // Persist regardless of stream delivery. On error with no content,
         // store an error assistant node so no user turn is left dangling.
         const content = full || `⚠️ generation failed: ${errMsg ?? 'unknown error'}`
-        await admin
-          .from('nodes')
-          .upsert(
-            {
-              id: assistantNodeId,
-              conversation_id: body.conversationId,
-              parent_id: userNodeId,
-              author_id: user.id,
-              role: 'assistant',
-              content,
-              reasoning: reasoning || null,
-              visibility,
-              model,
-            },
-            { onConflict: 'id' },
-          )
-          .then(() => undefined)
+        // If the client edited the very message this was replying to before
+        // generation finished, useLLMStream aborts the client's connection
+        // and — since editing purges the old user node — this upsert's
+        // parent_id now points at a row that no longer exists. That's not a
+        // bug to surface, just this turn losing the race to the edit: drop it
+        // instead of throwing out of a ReadableStream's finally (which would
+        // otherwise become an unhandled rejection).
+        const { error: assistantErr } = await admin.from('nodes').upsert(
+          {
+            id: assistantNodeId,
+            conversation_id: body.conversationId,
+            parent_id: userNodeId,
+            author_id: user.id,
+            role: 'assistant',
+            content,
+            reasoning: reasoning || null,
+            visibility,
+            model,
+          },
+          { onConflict: 'id' },
+        )
 
-        // cross-member fork → team_interaction_logs (de-noised RQ2 source)
-        if (isForkFromOther && parentAuthor) {
+        // cross-member fork → team_interaction_logs (de-noised RQ2 source) —
+        // only meaningful if the reply above actually landed somewhere.
+        if (!assistantErr && isForkFromOther && parentAuthor) {
           await admin
             .from('team_interaction_logs')
             .insert({

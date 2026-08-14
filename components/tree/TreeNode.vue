@@ -89,6 +89,7 @@ const reactionTargetId = computed(
 
 // ── Auto-summary (ChatGPT-sidebar style) instead of raw turns ──
 const summaries = useNodeSummaries()
+const { rename } = useNodeTitle()
 const transcript = computed(() =>
   props.segment.nodes
     .map((n) => `${n.role === 'assistant' ? 'Assistant' : 'User'}: ${n.content}`)
@@ -102,7 +103,33 @@ const entry = computed(() => summaries.get(sumKey.value))
 const summaryModel = computed(
   () => [...props.segment.nodes].reverse().find((n) => n.model)?.model ?? null,
 )
-watch(transcript, (t) => summaries.request(t, summaryModel.value), { immediate: true })
+// A human's manual rename (segment.head.title_manual, synced from the DB —
+// see server/api/nodes/rename.post.ts) always wins: never re-summarize over
+// it. Otherwise only ask the model again once the segment has actually grown
+// past whatever content its current title (if any) was generated from.
+watch(
+  transcript,
+  (t) => {
+    if (props.segment.head.title_manual) return
+    const key = summaries.keyFor(t)
+    if (props.segment.head.title && props.segment.head.title_hash === key) return
+    summaries.request(t, summaryModel.value)
+  },
+  { immediate: true },
+)
+// Persist a freshly-generated auto title so every teammate's canvas — not
+// just the browser that happened to trigger the LLM call — shows it.
+// `segment.head` is the same reactive object useConversation.ts keeps in its
+// nodesById map (segmentize() only groups references, never clones), so
+// mutating it here shows the new title immediately instead of waiting on the
+// realtime UPDATE round trip — which the eventual UPDATE then just confirms.
+watch(entry, (e) => {
+  if (props.segment.head.title_manual || !e || e.status !== 'done' || !e.text) return
+  if (e.text === props.segment.head.title && sumKey.value === props.segment.head.title_hash) return
+  props.segment.head.title = e.text
+  props.segment.head.title_hash = sumKey.value
+  rename(props.segment.head.id, e.text, false, sumKey.value)
+})
 
 // Ask the page to (re)tag this segment with concepts whenever its tip moves
 // (new shared content) — mirrors the summary trigger above, but the actual
@@ -116,9 +143,41 @@ watch(
 )
 
 const title = computed(() => {
+  if (props.segment.head.title) return props.segment.head.title
   const e = entry.value
   return e?.status === 'done' && e.text ? e.text : null
 })
+
+// Inline rename of the card's title — a manual override (useNodeTitle.ts),
+// synced to every team member the same way the auto-summary is.
+const editingTitle = ref(false)
+const titleDraft = ref('')
+let titleInputEl: HTMLInputElement | null = null
+function setTitleInputEl(el: unknown) {
+  titleInputEl = el as HTMLInputElement | null
+}
+function startEditTitle() {
+  editingTitle.value = true
+  titleDraft.value = title.value ?? ''
+  nextTick(() => {
+    titleInputEl?.focus()
+    titleInputEl?.select()
+  })
+}
+function cancelEditTitle() {
+  editingTitle.value = false
+}
+function submitEditTitle() {
+  if (!editingTitle.value) return // already handled (Enter, then the input's blur on unmount)
+  const t = titleDraft.value.trim()
+  editingTitle.value = false
+  if (!t || t === title.value) return
+  // Optimistic — see the identical note on the auto-summary persist watcher
+  // above for why mutating segment.head directly is safe here.
+  props.segment.head.title = t
+  props.segment.head.title_manual = true
+  rename(props.segment.head.id, t, true)
+}
 
 function oneline(text: string, len = 70) {
   const clean = text.replace(/\s+/g, ' ').trim()
@@ -259,11 +318,35 @@ function showTip(n: TreeNode, ev: MouseEvent) {
 
     <div class="hdr">
       <div class="titlewrap">
-        <p class="ctitle" :class="{ ph: !title }">
-          <template v-if="title">{{ title }}</template>
-          <span v-else-if="entry?.status === 'error'">Untitled branch</span>
-          <span v-else class="shimmer">Summarizing…</span>
-        </p>
+        <input
+          v-if="editingTitle"
+          :ref="setTitleInputEl"
+          v-model="titleDraft"
+          class="ctitleinput nodrag"
+          maxlength="80"
+          @click.stop
+          @pointerdown.stop
+          @keydown.enter.exact.stop.prevent="submitEditTitle"
+          @keyup.esc.stop="cancelEditTitle"
+          @blur="submitEditTitle"
+        />
+        <template v-else>
+          <p class="ctitle" :class="{ ph: !title }">
+            <template v-if="title">{{ title }}</template>
+            <span v-else-if="entry?.status === 'error'">Untitled branch</span>
+            <span v-else class="shimmer">Summarizing…</span>
+          </p>
+          <button
+            v-if="!mergeMode"
+            type="button"
+            class="titleeditbtn nodrag"
+            title="Rename"
+            @click.stop="startEditTitle"
+            @pointerdown.stop
+          >
+            <AppIcon name="pencil" :size="11" />
+          </button>
+        </template>
       </div>
       <UiBadge v-if="shortTag" class="idtag">{{ shortTag }}</UiBadge>
       <span v-if="showVisibility !== false" class="lockicon" :title="visTitle">
@@ -467,6 +550,9 @@ function showTip(n: TreeNode, ev: MouseEvent) {
   margin: -2px -4px;
   padding: 2px 4px;
   border-radius: 8px;
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
 }
 .ctitle {
   margin: 0;
@@ -481,6 +567,38 @@ function showTip(n: TreeNode, ev: MouseEvent) {
   overflow: hidden;
 }
 .ctitle.ph { color: var(--muted); font-weight: 600; }
+.titleeditbtn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+  opacity: 0;
+  cursor: pointer;
+}
+.tnode:hover .titleeditbtn { opacity: 1; }
+.titleeditbtn:hover { background: var(--accent-soft); color: var(--ink); }
+.ctitleinput {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-bottom: 1.5px solid var(--accent);
+  background: none;
+  font-family: 'Geist', sans-serif;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--ink);
+}
+.ctitleinput:focus { outline: none; }
 .shimmer {
   color: var(--muted);
   animation: pulse 1.2s ease-in-out infinite;
