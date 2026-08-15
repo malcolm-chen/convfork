@@ -46,5 +46,15 @@ export default defineEventHandler(async (event) => {
     .trim()
     .slice(0, 80)
 
-  return { summary: clean || 'Untitled branch' }
+  // Never hand back a placeholder as if it were a real title: the caller
+  // (useNodeSummaries) persists whatever comes back over the realtime nodes
+  // UPDATE (see server/api/nodes/rename.post.ts) and, once persisted, the
+  // matching title_hash stops anyone from ever asking the model again — so a
+  // silently-returned 'Untitled branch' here used to bake itself in as the
+  // card's permanent title for the whole team. Throwing instead routes this
+  // through useNodeSummaries' status:'error' path, which the card shows as a
+  // transient shimmer/retry instead of writing anything to nodes.title.
+  if (!clean) throw createError({ statusCode: 502, statusMessage: 'model returned an empty title' })
+
+  return { summary: clean }
 })

@@ -10,6 +10,12 @@ type Entry = { text: string; status: 'loading' | 'done' | 'error' }
 
 const cache = reactive(new Map<string, Entry>())
 let inflight = 0
+// Per-key retry count, only for the auto-backoff below — a transient network
+// or model hiccup shouldn't leave a card stuck showing "Untitled branch" for
+// the rest of the session just because the one request that happened to run
+// failed.
+const retries = new Map<string, number>()
+const MAX_RETRIES = 3
 
 // Small, fast, well-distributed string hash (cyrb53) — stable across reloads,
 // also stored as nodes.title_hash so a client can tell an existing DB title
@@ -49,8 +55,28 @@ export function useNodeSummaries() {
     cache.set(key, { text: '', status: 'loading' })
     inflight++
     $fetch<{ summary: string }>('/api/summarize', { method: 'POST', body: { text: transcript.slice(0, 6000), model } })
-      .then((r) => cache.set(key, { text: r.summary, status: 'done' }))
-      .catch(() => cache.set(key, { text: '', status: 'error' }))
+      .then((r) => {
+        retries.delete(key)
+        cache.set(key, { text: r.summary, status: 'done' })
+      })
+      .catch(() => {
+        const attempt = (retries.get(key) ?? 0) + 1
+        if (attempt <= MAX_RETRIES) {
+          // Keep showing the loading shimmer through the retry — only a card
+          // that's exhausted its retries should ever fall back to the static
+          // "Untitled branch" text. Clear the entry (rather than leaving it
+          // 'loading') so the retried request() call isn't a no-op against
+          // its own still-'loading' de-dupe guard above.
+          retries.set(key, attempt)
+          setTimeout(() => {
+            cache.delete(key)
+            request(transcript, model)
+          }, attempt * 1500)
+          return
+        }
+        retries.delete(key)
+        cache.set(key, { text: '', status: 'error' })
+      })
       .finally(() => { inflight-- })
   }
 
