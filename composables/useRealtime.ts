@@ -1,6 +1,15 @@
 import type { RealtimeChannel } from '@supabase/supabase-js'
 import type { TreeNode, Reaction, Attachment } from '~/composables/useConversation'
 
+// Who's actively chatting on which segment (canvas card) right now — a live,
+// ephemeral signal, unlike everything else this file syncs. Never persisted:
+// consumers derive "idle" purely from how stale `updatedAt` has gotten.
+export interface PresenceMeta {
+  userId: string
+  segmentId: string
+  updatedAt: number
+}
+
 // Subscribes to nodes (INSERT+UPDATE) and reactions (INSERT+DELETE) for a
 // conversation. All updates are idempotent upserts-by-id (§8.3). A visibility
 // UPDATE that newly reveals a node triggers a lineage delta-fetch, because we
@@ -13,6 +22,26 @@ export function useRealtime(
   const supabase = useSupabaseClient()
   const user = useSupabaseUser()
   let channel: RealtimeChannel | null = null
+  // Raw per-connection presence state, refreshed wholesale on every 'sync' —
+  // simpler than reconciling join/leave deltas ourselves, and presence
+  // payloads are tiny/infrequent enough that this is cheap.
+  const presenceRaw = shallowRef<Record<string, PresenceMeta[]>>({})
+  // Grouped by segment id (== canvas card id) and de-duplicated by user, since
+  // the same person can hold two presence entries at once (two open tabs).
+  const presenceBySegment = computed(() => {
+    const map = new Map<string, PresenceMeta[]>()
+    for (const metas of Object.values(presenceRaw.value)) {
+      for (const meta of metas) {
+        if (!meta?.segmentId || !meta.userId) continue
+        const arr = map.get(meta.segmentId) ?? []
+        const i = arr.findIndex((m) => m.userId === meta.userId)
+        if (i === -1) arr.push(meta)
+        else if (meta.updatedAt > arr[i]!.updatedAt) arr[i] = meta
+        map.set(meta.segmentId, arr)
+      }
+    }
+    return map
+  })
 
   function start() {
     channel = supabase
@@ -94,6 +123,13 @@ export function useRealtime(
       // filters others' private rows anyway), so reconcile from the server:
       // load() drops everything the DB no longer returns.
       .on('broadcast', { event: 'cleared' }, () => conv.load())
+      // Live "who's chatting where" — see PresenceMeta above. Presence has no
+      // RLS of its own, so the *caller* (usePresenceActivity) must never
+      // track() a segment that isn't already shared; this side just relays
+      // whatever it's given.
+      .on('presence', { event: 'sync' }, () => {
+        presenceRaw.value = (channel?.presenceState() ?? {}) as Record<string, PresenceMeta[]>
+      })
       .subscribe((status) => {
         // On (re)subscribe, fully reconcile: load() re-reads nodes + reactions
         // and drops anything retracted while disconnected. (deltaFetch alone
@@ -117,6 +153,21 @@ export function useRealtime(
     channel?.send({ type: 'broadcast', event: 'cleared', payload: {} })
   }
 
+  // Publishes (or refreshes) this client's own "I'm chatting on this segment"
+  // signal. A later call simply overwrites the previous one — Presence only
+  // ever holds one payload per connection, which is exactly what we want: a
+  // teammate's avatar can only ever show on one card at a time, and it moves
+  // there the instant they act on a different one (see usePresenceActivity).
+  function trackPresence(meta: PresenceMeta) {
+    channel?.track(meta)
+  }
+
+  // Drops this client's presence entirely — used when there's no valid
+  // (shared) segment to attach it to, e.g. starting a new private draft.
+  function untrackPresence() {
+    channel?.untrack()
+  }
+
   function stop() {
     if (channel) {
       supabase.removeChannel(channel)
@@ -124,5 +175,14 @@ export function useRealtime(
     }
   }
 
-  return { start, stop, broadcastRetract, broadcastReveal, broadcastCleared }
+  return {
+    start,
+    stop,
+    broadcastRetract,
+    broadcastReveal,
+    broadcastCleared,
+    trackPresence,
+    untrackPresence,
+    presenceBySegment,
+  }
 }

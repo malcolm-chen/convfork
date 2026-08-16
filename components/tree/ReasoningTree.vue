@@ -8,6 +8,7 @@ import { segmentize, sharedOrder, sharedSegments, type Segment } from '~/composa
 import type { TreeNode, Reaction } from '~/composables/useConversation'
 import type { MergedNode } from '~/composables/useMergedNodes'
 import type { ConceptTag } from '~/composables/useConcepts'
+import type { PresenceMeta } from '~/composables/useRealtime'
 
 const props = defineProps<{
   nodes: TreeNode[]
@@ -15,6 +16,7 @@ const props = defineProps<{
   selectedId: string | null
   currentUserId: string
   memberNames: Record<string, string>
+  presenceBySegment?: Map<string, PresenceMeta[]>
   showVisibility?: boolean
   mergedNodes?: MergedNode[]
   mergeMode?: boolean
@@ -238,16 +240,36 @@ watch(
   },
   { immediate: true },
 )
+
+// The one-time "draw-in" animation on a freshly-created edge (see .edge-draw
+// below) needs its dash pattern normalized to the path's own length via SVG's
+// `pathLength` attribute — otherwise a fixed dasharray only covers a fixed
+// pixel budget, and once that branch's card is dragged far enough away for
+// the (now much longer) curve to exceed it, the dash pattern starts repeating
+// mid-path, making the line look like it disconnects short of the card.
+const treeWrapRef = ref<HTMLElement | null>(null)
+watch(
+  vfEdges,
+  () => {
+    nextTick(() => {
+      treeWrapRef.value
+        ?.querySelectorAll('.vue-flow__edge.edge-draw .vue-flow__edge-path:not([pathLength])')
+        .forEach((el) => el.setAttribute('pathLength', '1'))
+    })
+  },
+  { flush: 'post' },
+)
 </script>
 
 <template>
-  <div class="treewrap">
+  <div ref="treeWrapRef" class="treewrap">
     <VueFlow
       :nodes="vfNodes"
       :edges="vfEdges"
       :default-viewport="{ x: 0, y: 0, zoom: 1 }"
       :min-zoom="0.2"
       :max-zoom="1.5"
+      :auto-pan-on-node-drag="false"
     >
       <template #node-msg="{ data }">
         <NodeCard
@@ -257,6 +279,7 @@ watch(
           :selected-id="selectedId"
           :current-user-id="currentUserId"
           :member-names="memberNames"
+          :presence="presenceBySegment?.get(data.id) ?? []"
           :show-visibility="showVisibility !== false"
           :merge-mode="mergeMode"
           :merge-selected="mergeSelectedIds?.has(data.id) ?? false"
@@ -299,8 +322,8 @@ watch(
 
 /* One-time "thread" draw-in for a newly forked branch's connecting edge. */
 :deep(.edge-draw .vue-flow__edge-path) {
-  stroke-dasharray: 700;
-  stroke-dashoffset: 700;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
   animation: thread-draw 0.7s ease-out forwards;
 }
 @keyframes thread-draw {

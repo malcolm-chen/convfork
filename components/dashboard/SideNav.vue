@@ -12,6 +12,9 @@ const props = defineProps<{
   conversations: ConvoItem[]
   activeId?: string | null
   userId?: string
+  // Who's currently online, team-wide (see useTeamPresence.ts) — falls back
+  // to "just me" if presence hasn't synced yet (e.g. the instant after mount).
+  onlineIds?: Set<string>
   // Solo-chat study condition: there's no team to share a named project
   // with, so creation skips the naming step entirely (see openCreate below).
   individualLlm?: boolean
@@ -91,7 +94,7 @@ defineExpose({ openCreate })
       </label>
       <ul class="memberlist">
         <li v-for="m in filteredMembers" :key="m.id">
-          <UiAvatar :name="m.display_name" :color-key="m.id" :size="26" :online="m.id === userId" />
+          <UiAvatar :name="m.display_name" :color-key="m.id" :size="26" :online="onlineIds ? onlineIds.has(m.id) : m.id === userId" />
           <span class="mname">
             {{ m.display_name }}<span v-if="m.id === userId" class="you"> (you)</span>
           </span>

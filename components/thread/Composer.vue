@@ -13,6 +13,10 @@ const emit = defineEmits<{
     e: 'submit',
     payload: { text: string; model: string; thinking?: ThinkingEffort; attachments?: AttachmentRef[] },
   ): void
+  // Fired on every keystroke — drives the teammate presence indicator on the
+  // canvas (see usePresenceActivity.ts). Purely a liveness signal; the page
+  // decides whether/where it's actually allowed to show.
+  (e: 'activity'): void
 }>()
 
 const { pending: pendingFiles, isUploading, addFiles, remove: removeFile, clear: clearFiles, readyRefs } = useFileUpload()
@@ -60,6 +64,7 @@ watch(model, () => {
 
 function onInput() {
   logger.logTyping(text.value.length, { conversationId: props.conversationId })
+  emit('activity')
 }
 
 function submit() {

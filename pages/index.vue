@@ -246,12 +246,25 @@ function teardownRealtime() {
   }
 }
 
+// ── Realtime: a teammate created a project — refresh the list live ──
+const conversationsRt = useConversationsRealtime(refreshConvos)
+
+function setupConversationsRealtime(teamId: string | undefined) {
+  conversationsRt.stop()
+  if (teamId) conversationsRt.start(teamId)
+}
+
 onMounted(() => {
   logger.log('login', {})
   setupRealtime()
+  setupConversationsRealtime(profile.value?.team_id)
 })
 watch(() => profile.value?.team_id, setupRealtime)
-onUnmounted(teardownRealtime)
+watch(() => profile.value?.team_id, setupConversationsRealtime)
+onUnmounted(() => {
+  teardownRealtime()
+  conversationsRt.stop()
+})
 
 async function signOut() {
   logger.log('logout', {})

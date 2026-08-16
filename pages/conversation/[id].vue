@@ -30,6 +30,11 @@ const streamingModel = ref<string | null>(null)
 const nodes = conv.nodes
 const reactionsByNode = conv.reactionsByNode
 const attachmentsByNode = conv.attachmentsByNode
+// Aliased to a top-level binding (matching the pattern above) so the
+// template's ref-unwrapping actually applies — `rt.presenceBySegment` inside
+// a template expression would otherwise hand the ComputedRef object itself
+// to ReasoningTree instead of its unwrapped Map.
+const presenceBySegment = rt.presenceBySegment
 const selectedId = ref<string | null>(null)
 // Set when the user explicitly forks: the chat panel then renders everything
 // up to this node as prior history, with a divider before the new branch.
@@ -49,6 +54,18 @@ const activeDraftKey = ref<string | null>(null)
 const DRAFTS_KEY = `convfork:draftForks:${conversationId}`
 const currentUserId = computed(() => user.value?.id ?? '')
 const messages = computed(() => (drafting.value ? [] : conv.lineageOf(selectedId.value)))
+
+// Teammate presence: "someone is chatting here" avatars on the canvas — see
+// usePresenceActivity.ts for what counts as active and the privacy filter.
+const presenceActivity = usePresenceActivity({
+  nodes,
+  selectedId,
+  drafting,
+  isStreaming,
+  currentUserId,
+  trackPresence: rt.trackPresence,
+  untrackPresence: rt.untrackPresence,
+})
 
 // The single user message (if any) an "Edit" button may appear on: your own,
 // last-in-branch, and not already forked below — anything else makes "revert
@@ -253,6 +270,13 @@ const { data: members } = await useAsyncData('conv:members', async () => {
   return (data ?? []) as Member[]
 })
 
+// Team-wide online status for the SideNav member list — separate from the
+// per-conversation "chatting on this node" presence above, and not started
+// for the individual_llm condition (no team panel/concept there at all).
+const teamPresence = useTeamPresence(profile.value?.team_id ?? '')
+// See the identical note on presenceBySegment above re: template unwrapping.
+const onlineIds = teamPresence.onlineIds
+
 const { data: convos, refresh: refreshConvos } = await useAsyncData('conv:list', async () => {
   if (!profile.value?.team_id) return []
   // Embed each conversation's latest visible node (RLS-scoped) so projects
@@ -273,6 +297,10 @@ const { data: convos, refresh: refreshConvos } = await useAsyncData('conv:list',
     }))
     .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
 })
+
+// A teammate creating a project elsewhere shouldn't require leaving this page
+// (or refreshing) for it to show up in the sidebar's project list.
+const conversationsRt = useConversationsRealtime(refreshConvos)
 
 const convo = computed(() => (convos.value as any[])?.find((c) => c.id === conversationId))
 
@@ -406,6 +434,8 @@ onMounted(async () => {
 
   await conv.load()
   rt.start()
+  if (!individualLlm.value) teamPresence.start()
+  conversationsRt.start(profile.value?.team_id ?? '')
   await mergedNodesStore.refresh()
   await conceptsStore.refresh()
   loadDraftForks()
@@ -417,6 +447,8 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   rt.stop()
+  teamPresence.stop()
+  conversationsRt.stop()
   logger.flush()
 })
 
@@ -985,6 +1017,7 @@ async function signOut() {
       :conversations="convos ?? []"
       :active-id="conversationId"
       :user-id="user?.id"
+      :online-ids="onlineIds"
       @create="createConversation"
       @rename="renameConversation"
       @delete="deleteConversation"
@@ -1072,6 +1105,7 @@ async function signOut() {
           :forked="!!forkPointId && selectedId === forkPointId && !drafting"
           :disabled="isStreaming"
           @submit="onSubmit"
+          @activity="presenceActivity.onComposerActivity"
         />
       </div>
     </aside>
@@ -1101,7 +1135,7 @@ async function signOut() {
                 :name="p.name"
                 :color-key="p.id"
                 :size="26"
-                online
+                :online="onlineIds.has(p.id)"
               />
             </div>
           </div>
@@ -1143,6 +1177,7 @@ async function signOut() {
           :selected-id="selectedId"
           :current-user-id="currentUserId"
           :member-names="memberNames"
+          :presence-by-segment="presenceBySegment"
           :show-visibility="selectiveSharing"
           :merged-nodes="mergedNodesStore.nodes.value"
           :merge-mode="mergeMode.state.active"

@@ -3,6 +3,7 @@ import { Handle, Position } from '@vue-flow/core'
 import type { TreeNode, Reaction } from '~/composables/useConversation'
 import { turnNumberOf, type Segment } from '~/composables/useSegments'
 import type { ConceptTag } from '~/composables/useConcepts'
+import type { PresenceMeta } from '~/composables/useRealtime'
 import { renderMarkdown } from '~/utils/markdown'
 
 // One card = one conversation trajectory (segment), not one turn.
@@ -14,6 +15,8 @@ const props = defineProps<{
   selectedId: string | null
   currentUserId: string
   memberNames: Record<string, string>
+  /** Teammates currently chatting on this segment (self already filtered out by ReasoningTree). */
+  presence?: PresenceMeta[]
   showVisibility?: boolean
   // Merge mode: clicking the card toggles it into the merge selection
   // instead of selecting/forking — see pages/conversation/[id].vue.
@@ -86,6 +89,34 @@ const segReactions = computed(() =>
 const reactionTargetId = computed(
   () => props.segment.nodes.find((n) => n.visibility === 'shared')?.id ?? props.segment.head.id,
 )
+
+// Who's pinned this card — same 📌 reaction ReactionBar.vue's quick-pin
+// button toggles (kept as a plain reaction so it stays in sync automatically
+// via the same realtime/reaction machinery, rather than a separate field).
+// Surfaced here as a top-left badge + tinted background so a pinned branch is
+// obvious at a glance on the canvas, not just inside the reaction bar.
+const PIN_EMOJI = '📌'
+const pinnedBy = computed(() => {
+  const seen = new Set<string>()
+  const list: { userId: string; name: string }[] = []
+  for (const r of segReactions.value) {
+    if (r.type !== PIN_EMOJI || seen.has(r.user_id)) continue
+    seen.add(r.user_id)
+    list.push({ userId: r.user_id, name: r.user_id === props.currentUserId ? 'You' : (props.memberNames[r.user_id] ?? 'Someone') })
+  }
+  // "You" first, matching ReactionBar's own pin-tip ordering.
+  return list.sort((a, b) => (a.name === 'You' ? -1 : b.name === 'You' ? 1 : 0))
+})
+const isPinned = computed(() => pinnedBy.value.length > 0)
+// "You pinned this node" / "Ada pinned this node" / "You and Sam pinned this
+// node" / "Ada and 2 others pinned this node".
+const pinTooltip = computed(() => {
+  const names = pinnedBy.value.map((p) => p.name)
+  if (!names.length) return ''
+  if (names.length === 1) return names[0] === 'You' ? 'You pinned this node' : `${names[0]} pinned this node`
+  if (names.length === 2) return `${names[0]} and ${names[1]} pinned this node`
+  return `${names[0]} and ${names.length - 1} others pinned this node`
+})
 
 // ── Auto-summary (ChatGPT-sidebar style) instead of raw turns ──
 const summaries = useNodeSummaries()
@@ -301,16 +332,134 @@ function showTip(n: TreeNode, ev: MouseEvent) {
     tipPos.top = Math.min(Math.max(centerY - h / 2, 12), maxTop)
   })
 }
+
+// ── Teammate presence: bottom-corner avatar stack ──
+// A presence entry never disappears on its own once someone's chatted here —
+// it just fades to "idle" once their activity goes stale (Google-Docs-style),
+// so teammates can still see *where* everyone last worked, not just where
+// they're working right this second. `now` only needs to tick while there's
+// something to fade, so the timer starts/stops with presence itself.
+const IDLE_MS = 9000
+const now = ref(Date.now())
+let nowTimer: ReturnType<typeof setInterval> | null = null
+watch(
+  () => (props.presence?.length ?? 0) > 0,
+  (hasPresence) => {
+    if (hasPresence && !nowTimer) {
+      now.value = Date.now()
+      nowTimer = setInterval(() => { now.value = Date.now() }, 2000)
+    } else if (!hasPresence && nowTimer) {
+      clearInterval(nowTimer)
+      nowTimer = null
+    }
+  },
+  { immediate: true },
+)
+onBeforeUnmount(() => {
+  if (nowTimer) clearInterval(nowTimer)
+})
+
+// Includes the viewer's own entry too — confirms the feature is actually
+// live for the person typing, same as how a Google Docs/Figma cursor shows
+// up for its own owner, not just everyone else. `name` always stays the
+// person's real display name (so the avatar's initials/color match every
+// other avatar of theirs in the app, e.g. the turn list and "Shared by"
+// footer) — only the tooltip's wording swaps in "You" for the viewer.
+const presenceUsers = computed(() =>
+  (props.presence ?? [])
+    .map((p) => {
+      const isSelf = p.userId === props.currentUserId
+      return {
+        userId: p.userId,
+        name: props.memberNames[p.userId] ?? 'Someone',
+        isSelf,
+        idle: now.value - p.updatedAt > IDLE_MS,
+      }
+    })
+    // Self first, then alphabetical — reads naturally as "You and Sam…"
+    // rather than "Sam and You…".
+    .sort((a, b) => (a.isSelf ? -1 : b.isSelf ? 1 : a.name.localeCompare(b.name))),
+)
+const PRESENCE_AVATAR_CAP = 3
+const visiblePresence = computed(() => presenceUsers.value.slice(0, PRESENCE_AVATAR_CAP))
+const presenceOverflow = computed(() => Math.max(0, presenceUsers.value.length - PRESENCE_AVATAR_CAP))
+// "Ada is chatting here" / "You are chatting here" / "You and Sam are chatting
+// here" / "Ada and 2 others are chatting here".
+const presenceTooltip = computed(() => {
+  const names = presenceUsers.value.map((p) => (p.isSelf ? 'You' : p.name))
+  if (!names.length) return ''
+  if (names.length === 1) return names[0] === 'You' ? 'You are chatting here' : `${names[0]} is chatting here`
+  if (names.length === 2) return `${names[0]} and ${names[1]} are chatting here`
+  return `${names[0]} and ${names.length - 1} others are chatting here`
+})
+
+const presenceTipVisible = ref(false)
+const presenceTipPos = reactive({ top: 0, left: 0 })
+let presenceHideTimer: ReturnType<typeof setTimeout> | null = null
+function clearPresenceHideTimer() {
+  if (presenceHideTimer != null) {
+    clearTimeout(presenceHideTimer)
+    presenceHideTimer = null
+  }
+}
+function schedulePresenceHide() {
+  clearPresenceHideTimer()
+  presenceHideTimer = setTimeout(() => { presenceTipVisible.value = false }, 150)
+}
+function showPresenceTip(ev: MouseEvent) {
+  clearPresenceHideTimer()
+  presenceTipVisible.value = true
+  const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect()
+  const TIP_WIDTH = 220
+  presenceTipPos.left = Math.min(rect.left, window.innerWidth - TIP_WIDTH - 12)
+  presenceTipPos.top = Math.max(12, rect.top - 10)
+}
+
+// Same hand-rolled hover-tooltip pattern as presence above, just anchored
+// below the badge instead of above it (the pin badge already sits right at
+// the card's top edge, so there's no room to place a tip above it).
+const pinTipVisible = ref(false)
+const pinTipPos = reactive({ top: 0, left: 0 })
+let pinHideTimer: ReturnType<typeof setTimeout> | null = null
+function clearPinHideTimer() {
+  if (pinHideTimer != null) {
+    clearTimeout(pinHideTimer)
+    pinHideTimer = null
+  }
+}
+function schedulePinHide() {
+  clearPinHideTimer()
+  pinHideTimer = setTimeout(() => { pinTipVisible.value = false }, 150)
+}
+function showPinTip(ev: MouseEvent) {
+  clearPinHideTimer()
+  pinTipVisible.value = true
+  const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect()
+  const TIP_WIDTH = 220
+  pinTipPos.left = Math.min(rect.left, window.innerWidth - TIP_WIDTH - 12)
+  pinTipPos.top = rect.bottom + 8
+}
 </script>
 
 <template>
   <div
     class="tnode"
-    :class="{ sel: isSelected, forkpt: segment.head.is_fork_point, mergeable: mergeMode, mergeselected: mergeSelected, highlight: isHighlighted, dimmed: isDimmed }"
+    :class="{ sel: isSelected, forkpt: segment.head.is_fork_point, mergeable: mergeMode, mergeselected: mergeSelected, highlight: isHighlighted, dimmed: isDimmed, pinned: isPinned }"
     @click="onCardClick"
   >
     <span v-if="mergeMode" class="mergemark" :class="{ on: mergeSelected }">
       <AppIcon v-if="mergeSelected" name="check" :size="11" />
+    </span>
+    <!-- Pinned indicator: skipped in merge mode since it shares the same
+         top-left corner as the merge-select mark above. -->
+    <span
+      v-if="isPinned && !mergeMode"
+      class="pinbadge"
+      @click.stop
+      @mouseenter="showPinTip"
+      @mouseleave="schedulePinHide"
+    >
+      <AppIcon name="thumbtack" :size="11" />
     </span>
     <!-- Invisible — kept only so vue-flow anchors edges left/right instead of
          falling back to top/bottom; the visible connector is now per-turn (.tdot). -->
@@ -417,6 +566,29 @@ function showTip(n: TreeNode, ev: MouseEvent) {
          aren't rendered as their own handle (turns past the row cap, or a
          parent re-parented past a hidden segment). -->
     <Handle id="card-src" type="source" :position="Position.Right" class="cardhandle" />
+
+    <!-- Teammate presence: who's chatting on this segment right now. Never
+         shown for a segment that isn't shared — there's nothing to leak,
+         since a private segment never even reaches this component (see
+         useSegments.sharedSegments) and usePresenceActivity never tracks one. -->
+    <div
+      v-if="presenceUsers.length"
+      class="presence-stack"
+      @click.stop
+      @mouseenter="showPresenceTip"
+      @mouseleave="schedulePresenceHide"
+    >
+      <UiAvatar
+        v-for="p in visiblePresence"
+        :key="p.userId"
+        class="presence-avatar"
+        :class="{ idle: p.idle }"
+        :name="p.name"
+        :color-key="p.userId"
+        :size="20"
+      />
+      <span v-if="presenceOverflow" class="presence-overflow">+{{ presenceOverflow }}</span>
+    </div>
   </div>
 
   <!-- Teleported to <body> so this always paints above every canvas node,
@@ -453,6 +625,34 @@ function showTip(n: TreeNode, ev: MouseEvent) {
       <template v-else>{{ hoverTurn.content }}</template>
     </div>
   </Teleport>
+
+  <!-- Teleported for the same reason as the turn popover above: escapes this
+       node's own vue-flow stacking context so it always paints on top. -->
+  <Teleport to="body">
+    <div
+      v-if="presenceTipVisible"
+      class="presence-tip-portal"
+      role="tooltip"
+      :style="{ top: presenceTipPos.top + 'px', left: presenceTipPos.left + 'px' }"
+      @mouseenter="clearPresenceHideTimer"
+      @mouseleave="schedulePresenceHide"
+    >
+      {{ presenceTooltip }}
+    </div>
+  </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="pinTipVisible"
+      class="presence-tip-portal pin-tip-portal"
+      role="tooltip"
+      :style="{ top: pinTipPos.top + 'px', left: pinTipPos.left + 'px' }"
+      @mouseenter="clearPinHideTimer"
+      @mouseleave="schedulePinHide"
+    >
+      {{ pinTooltip }}
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -474,6 +674,11 @@ function showTip(n: TreeNode, ev: MouseEvent) {
 .tnode.mergeselected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
 .tnode.highlight { border-color: var(--highlight); box-shadow: 0 0 0 2px var(--highlight); }
 .tnode.dimmed { opacity: 0.4; }
+/* Pinned: a warm sticky-note tint on the whole card, distinct from the
+   border/box-shadow language used by selection/highlight above — so a pinned
+   branch reads as a persistent label rather than a momentary interaction
+   state, and still shows clearly through those states if both apply. */
+.tnode.pinned { background: #fef6e3; }
 /* The merge-select mark is an absolutely positioned badge, not part of the
    normal flow, so it sits on top of whatever's in that corner regardless of
    how much room the content itself has — the card needs extra top/left
@@ -494,6 +699,25 @@ function showTip(n: TreeNode, ev: MouseEvent) {
   color: #fff;
 }
 .mergemark.on { background: var(--accent); border-color: var(--accent); }
+
+/* Pinned badge — peeks off the card's top-left corner, mirroring how the
+   presence stack peeks off the bottom-right, so the two "someone did
+   something to this card" affordances read as one visual family. */
+.pinbadge {
+  position: absolute;
+  top: -8px;
+  left: -8px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--highlight);
+  color: #fff;
+  box-shadow: 0 0 0 2px var(--card);
+  cursor: default;
+}
 
 .hdr { position: relative; display: flex; align-items: flex-start; gap: 8px; margin-bottom: 8px; }
 .idtag, .lockicon { margin-top: 2px; }
@@ -783,4 +1007,95 @@ function showTip(n: TreeNode, ev: MouseEvent) {
 .flabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .flabel strong { font-weight: 700; color: var(--ink); }
 .ftime { flex: none; font-variant-numeric: tabular-nums; }
+
+/* Teammate presence — a small overlapping stack peeking off the card's
+   bottom-right corner, like a facepile badge rather than part of the normal
+   layout flow (it must never push the footer around as people come/go).
+   Deliberately styled differently from every OTHER avatar on this card (turn
+   rows, "Shared by" footer): those are flat, plain-bordered authorship
+   credits, while a presence avatar gets a colored ring that pulses thicker —
+   a live "here right now" signal, not a byline. Green (the same hue as the
+   online dot elsewhere in the app), not the purple --accent used for
+   selection/highlights, so it doesn't get confused with those. The avatar's
+   own initials/color are untouched (still driven by the person's real name +
+   userId, same as everywhere else), so it's still instantly recognizable as
+   the same person. */
+.presence-stack {
+  position: absolute;
+  right: 8px;
+  bottom: -12px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  cursor: default;
+}
+.presence-avatar {
+  position: relative;
+  box-sizing: content-box;
+  border-radius: 50%;
+  /* Two-tone ring: a card-colored gap (so it reads as a ring, not a smear
+     against whatever's behind it) plus the actual presence-colored ring
+     outside it. The ring's own thickness pulses (see below) — an obvious
+     "still active" tell without adding another shape on top. */
+  box-shadow: 0 0 0 2px var(--card), 0 0 0 3px var(--nav-online);
+  transition: filter 0.2s ease;
+  animation: presence-pulse 1.6s ease-in-out infinite;
+}
+.presence-avatar:not(:first-child) { margin-left: -5px; }
+@keyframes presence-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--card), 0 0 0 3px var(--nav-online); }
+  50% { box-shadow: 0 0 0 2px var(--card), 0 0 0 6px var(--nav-online); }
+}
+/* Faded/desaturated once their activity has gone stale — still shows WHERE
+   they last worked, Google-Docs-cursor style, instead of vanishing outright.
+   The ring also drops to a neutral gray and stops pulsing: idle specifically
+   means "not a live signal right now". Muted via a translucent white veil
+   (::after) rather than `opacity`, which would let the card's border/edge
+   bleed through the avatar where it overlaps the corner. */
+.presence-avatar.idle {
+  filter: grayscale(1);
+  box-shadow: 0 0 0 2px var(--card), 0 0 0 3px var(--muted);
+  animation: none;
+}
+.presence-avatar.idle::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.55);
+  pointer-events: none;
+}
+.presence-overflow {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-left: -5px;
+  box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--muted);
+  border-radius: 50%;
+  background: var(--muted);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  box-sizing: content-box;
+}
+.presence-tip-portal {
+  position: fixed;
+  z-index: 150;
+  transform: translateY(-100%);
+  max-width: 220px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--ink);
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  box-shadow: 0 10px 24px rgba(20, 20, 30, 0.24);
+  pointer-events: auto;
+}
+/* The pin badge sits at the card's top edge, so its tip hangs below the
+   anchor instead of above it (unlike the presence tip's default upward
+   placement) — cancel the inherited translateY(-100%). */
+.pin-tip-portal { transform: none; }
 </style>
