@@ -22,23 +22,33 @@ export function useRealtime(
   const supabase = useSupabaseClient()
   const user = useSupabaseUser()
   let channel: RealtimeChannel | null = null
-  // Raw per-connection presence state, refreshed wholesale on every 'sync' —
-  // simpler than reconciling join/leave deltas ourselves, and presence
-  // payloads are tiny/infrequent enough that this is cheap.
-  const presenceRaw = shallowRef<Record<string, PresenceMeta[]>>({})
-  // Grouped by segment id (== canvas card id) and de-duplicated by user, since
-  // the same person can hold two presence entries at once (two open tabs).
+
+  // Who's on which segment right now — built from plain `broadcast` messages,
+  // NOT Supabase Presence. Presence turned out to have a low, hard rate limit
+  // specific to this project (confirmed empirically: track()/untrack() calls
+  // start silently timing out after only a handful in quick succession, while
+  // plain broadcasts at the same rate never fail) — anyone switching between
+  // more than a few nodes in one session would eventually stop updating for
+  // everyone. Broadcast has no such ceiling, so presence rides on it instead,
+  // with this map as the only state (keyed by userId, so a fresh update for
+  // someone always just overwrites their old one — no accumulation to
+  // dedupe, unlike Presence's own multi-meta-per-connection behavior).
+  const presenceByUser = reactive(new Map<string, PresenceMeta>())
+  // Broadcast has no built-in "this connection disconnected" notification
+  // (unlike Presence), so a genuinely gone user (closed tab, crashed) is only
+  // ever detected by their entry going stale — pruned well past the UI's own
+  // idle-fade threshold (TreeNode.vue's IDLE_MS), so it reads as "idle" for a
+  // while before actually disappearing, rather than snapping away right when
+  // idle styling would otherwise kick in.
+  const PRESENCE_GONE_MS = 30000
+  let pruneTimer: ReturnType<typeof setInterval> | null = null
+
   const presenceBySegment = computed(() => {
     const map = new Map<string, PresenceMeta[]>()
-    for (const metas of Object.values(presenceRaw.value)) {
-      for (const meta of metas) {
-        if (!meta?.segmentId || !meta.userId) continue
-        const arr = map.get(meta.segmentId) ?? []
-        const i = arr.findIndex((m) => m.userId === meta.userId)
-        if (i === -1) arr.push(meta)
-        else if (meta.updatedAt > arr[i]!.updatedAt) arr[i] = meta
-        map.set(meta.segmentId, arr)
-      }
+    for (const meta of presenceByUser.values()) {
+      const arr = map.get(meta.segmentId) ?? []
+      arr.push(meta)
+      map.set(meta.segmentId, arr)
     }
     return map
   })
@@ -123,12 +133,17 @@ export function useRealtime(
       // filters others' private rows anyway), so reconcile from the server:
       // load() drops everything the DB no longer returns.
       .on('broadcast', { event: 'cleared' }, () => conv.load())
-      // Live "who's chatting where" — see PresenceMeta above. Presence has no
-      // RLS of its own, so the *caller* (usePresenceActivity) must never
-      // track() a segment that isn't already shared; this side just relays
-      // whatever it's given.
-      .on('presence', { event: 'sync' }, () => {
-        presenceRaw.value = (channel?.presenceState() ?? {}) as Record<string, PresenceMeta[]>
+      // Live "who's chatting where" — see PresenceMeta above. This has no RLS
+      // of its own (same as retract/reveal above), so the *caller*
+      // (usePresenceActivity) must never announce a segment that isn't
+      // already shared; this side just relays whatever it's given.
+      .on('broadcast', { event: 'presence-update' }, (p) => {
+        const meta = p.payload as PresenceMeta
+        if (meta?.userId && meta.segmentId) presenceByUser.set(meta.userId, meta)
+      })
+      .on('broadcast', { event: 'presence-leave' }, (p) => {
+        const userId = p.payload?.userId as string | undefined
+        if (userId) presenceByUser.delete(userId)
       })
       .subscribe((status) => {
         // On (re)subscribe, fully reconcile: load() re-reads nodes + reactions
@@ -136,6 +151,15 @@ export function useRealtime(
         // misses visibility UPDATEs — they don't touch created_at.)
         if (status === 'SUBSCRIBED') conv.load()
       })
+
+    // Catches a teammate's tab closing/crashing without sending
+    // presence-leave (see stop() below for the graceful-navigation path).
+    pruneTimer = setInterval(() => {
+      const cutoff = Date.now() - PRESENCE_GONE_MS
+      for (const [userId, meta] of presenceByUser) {
+        if (meta.updatedAt < cutoff) presenceByUser.delete(userId)
+      }
+    }, 10000)
   }
 
   // Author-side announcement for shared→private flips (see broadcast handler).
@@ -153,25 +177,35 @@ export function useRealtime(
     channel?.send({ type: 'broadcast', event: 'cleared', payload: {} })
   }
 
-  // Publishes (or refreshes) this client's own "I'm chatting on this segment"
-  // signal. A later call simply overwrites the previous one — Presence only
-  // ever holds one payload per connection, which is exactly what we want: a
-  // teammate's avatar can only ever show on one card at a time, and it moves
-  // there the instant they act on a different one (see usePresenceActivity).
+  // Publishes (or refreshes) this client's own "I'm on this segment" signal.
+  // Updates the local map immediately (so the sender sees their own "You"
+  // entry without waiting on a round trip — broadcasts aren't delivered back
+  // to their own sender by default) and broadcasts it out for everyone else.
   function trackPresence(meta: PresenceMeta) {
-    channel?.track(meta)
+    presenceByUser.set(meta.userId, meta)
+    channel?.send({ type: 'broadcast', event: 'presence-update', payload: meta })
   }
 
   // Drops this client's presence entirely — used when there's no valid
   // (shared) segment to attach it to, e.g. starting a new private draft.
   function untrackPresence() {
-    channel?.untrack()
+    if (!user.value?.id) return
+    presenceByUser.delete(user.value.id)
+    channel?.send({ type: 'broadcast', event: 'presence-leave', payload: { userId: user.value.id } })
   }
 
   function stop() {
     if (channel) {
+      // Best-effort: tell everyone else this connection is gone right away,
+      // rather than waiting for the stale-entry pruning above to catch it —
+      // covers ordinary navigation away, though not a hard crash/tab close.
+      untrackPresence()
       supabase.removeChannel(channel)
       channel = null
+    }
+    if (pruneTimer) {
+      clearInterval(pruneTimer)
+      pruneTimer = null
     }
   }
 

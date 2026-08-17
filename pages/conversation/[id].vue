@@ -732,28 +732,6 @@ async function onUnreact(payload: { id: string; nodeId: string; type: string }) 
   if (!error) conv.removeReaction(payload.id, payload.nodeId)
 }
 
-// Segment-level share/unshare: flips all of the caller's OWN nodes in the
-// trajectory (RLS blocks touching other authors' nodes anyway).
-async function onToggleVisibility(segmentNodes: TreeNode[]) {
-  if (!selectiveSharing.value) return
-  const own = segmentNodes.filter((n) => n.author_id === currentUserId.value)
-  if (!own.length) return
-  const to = own.some((n) => n.visibility === 'private') ? 'shared' : 'private'
-  const ids = own.map((n) => n.id)
-  logger.log('toggle_visibility', { node_ids: ids, to, scope: 'segment' }, { conversationId, nodeId: segmentNodes[0]!.id })
-  const { error } = await supabase.from('nodes').update({ visibility: to }).in('id', ids)
-  if (error) return
-  // Patch local state immediately — don't wait for the realtime round trip
-  // (which teammates never even get for shared→private, since RLS filters it).
-  for (const n of own) conv.upsert({ ...n, visibility: to })
-  // Teammates don't reliably receive this UPDATE over postgres_changes either
-  // way — not for shared→private (RLS filters against the new row) nor for
-  // private→shared (they weren't authorized to see the old row, so Realtime
-  // doesn't consistently deliver the reveal) — so broadcast it explicitly.
-  if (to === 'private') rt.broadcastRetract(ids)
-  else rt.broadcastReveal(ids)
-}
-
 // Own nodes on the root→selected path — what the "Share/Unshare branch"
 // button in the header actually controls (teammates' own nodes are untouched).
 const ownBranchNodes = computed(() => messages.value.filter((n) => n.author_id === currentUserId.value))
@@ -1190,11 +1168,11 @@ async function signOut() {
           @fork="onFork"
           @react="onReact"
           @unreact="onUnreact"
-          @toggle-visibility="onToggleVisibility"
           @toggle-merge-select="onToggleMergeSelect"
           @fork-merge="onForkMerge"
           @delete-merge="onDeleteMerge"
           @request-concepts="onRequestConcepts"
+          @view-segment="presenceActivity.onViewSegment"
         />
       </div>
 

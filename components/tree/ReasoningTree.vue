@@ -31,11 +31,11 @@ const emit = defineEmits<{
   (e: 'fork', id: string): void
   (e: 'react', payload: { nodeId: string; type: string }): void
   (e: 'unreact', payload: { id: string; nodeId: string; type: string }): void
-  (e: 'toggle-visibility', nodes: TreeNode[]): void
   (e: 'toggle-merge-select', segmentId: string): void
   (e: 'fork-merge', mergedNodeId: string): void
   (e: 'delete-merge', mergedNodeId: string): void
   (e: 'request-concepts', payload: { segmentHeadNodeId: string; tipNodeId: string; model?: string | null }): void
+  (e: 'view-segment', payload: { segmentId: string; viewing: boolean }): void
 }>()
 
 // Recomputed synchronously (no debounce) straight off props.nodes, so a card's
@@ -291,9 +291,9 @@ watch(
           @fork="(id) => emit('fork', id)"
           @react="(p) => emit('react', p)"
           @unreact="(p) => emit('unreact', p)"
-          @toggle-visibility="(ns) => emit('toggle-visibility', ns)"
           @toggle-merge-select="(id) => emit('toggle-merge-select', id)"
           @request-concepts="(p) => emit('request-concepts', p)"
+          @view-segment="(p) => emit('view-segment', p)"
         />
       </template>
       <template #node-merged="{ data }">
