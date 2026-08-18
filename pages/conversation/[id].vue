@@ -2,7 +2,7 @@
 import type { TreeNode } from '~/composables/useConversation'
 import type { AttachmentRef } from '~/composables/useFileUpload'
 import type { ConceptTag } from '~/composables/useConcepts'
-import { segmentize, sharedOrder, sharedSegments, turnNumberOf } from '~/composables/useSegments'
+import { firstSharedNodeId, segmentize, sharedOrder, sharedSegments, turnNumberOf } from '~/composables/useSegments'
 import { DEFAULT_MODEL_ID } from '#shared/models'
 
 // Without this, navigating between two conversation pages (e.g. forking,
@@ -21,7 +21,10 @@ const user = useSupabaseUser()
 const logger = useActionLogger()
 
 const conv = useConversation(conversationId)
-const rt = useRealtime(conversationId, conv)
+// mergedNodesStore isn't declared until below, but this callback only ever
+// runs later (off a realtime event, well after setup finishes) — safe to
+// close over it here rather than hoist its declaration just for ordering.
+const rt = useRealtime(conversationId, conv, () => mergedNodesStore.refresh())
 const { streamingText, streamingReasoning, isStreaming, error, send } = useLLMStream()
 // The model backbone the in-flight reply is using — known synchronously at
 // submit time, well before any node carrying it is persisted.
@@ -112,7 +115,13 @@ const modalSources = computed(() => {
     const seg = segs.find((s) => s.id === headId)
     const starter = seg?.nodes.find((n) => n.role === 'user') ?? seg?.head
     return {
-      headNodeId: headId,
+      // The segment's true head can be a private turn its author never
+      // shared (selective per-turn sharing) — teammates' clients never load
+      // that node at all, so a merge source keyed by it resolves for the
+      // author but not for anyone else (see useSegments.ts's
+      // firstSharedNodeId). The first shared node in the chain is the only
+      // id every team member can resolve the same way.
+      headNodeId: seg ? firstSharedNodeId(seg) : headId,
       tipNodeId: seg?.tip.id ?? headId,
       label: snippet(starter?.content ?? '', 60) || 'Untitled',
       authorId: starter?.author_id ?? '',

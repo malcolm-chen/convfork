@@ -118,12 +118,24 @@ const MERGED_H = 150
 function relayout() {
   const segs = segments.value
   const segIds = new Set(segs.map((s) => s.id))
+  // A merge source's segment_head_node_id isn't necessarily THIS viewer's own
+  // segment.id: the id stored server-side is whatever node the merge's
+  // creator had at the top of their segment, which — with selective per-turn
+  // sharing — can be a node that only exists (as a *head*) on their client.
+  // Every viewer who can see the segment at all still has that exact node
+  // somewhere in its chain (it's shared, or it's their own private lead-in),
+  // so resolve by containment instead of requiring an exact head-id match.
+  const segIdByNodeId = new Map<string, string>()
+  for (const s of segs) for (const n of s.nodes) segIdByNodeId.set(n.id, s.id)
   // Only merged nodes whose sources are all still visible segments lay out —
-  // a source that's since been unshared just drops that one edge rather than
-  // erroring dagre with a reference to a node it doesn't have.
+  // a source that's since been unshared (or, previously, unresolvable on this
+  // viewer's client) just drops that one edge rather than erroring dagre with
+  // a reference to a node it doesn't have.
   const merged = (props.mergedNodes ?? []).map((mn) => ({
     ...mn,
-    sources: mn.sources.filter((s) => segIds.has(s.segmentHeadNodeId)),
+    sources: mn.sources
+      .map((s) => ({ ...s, segmentHeadNodeId: segIdByNodeId.get(s.segmentHeadNodeId) ?? s.segmentHeadNodeId }))
+      .filter((s) => segIds.has(s.segmentHeadNodeId)),
   }))
 
   // Segments (and merged nodes) that weren't around last layout get a one-time

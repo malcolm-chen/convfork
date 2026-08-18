@@ -18,6 +18,12 @@ export interface PresenceMeta {
 export function useRealtime(
   conversationId: string,
   conv: ReturnType<typeof useConversation>,
+  // Merged-context-node changes (create/delete) aren't part of `conv`'s own
+  // node tree — the canvas keeps them in a separate useMergedNodes() store,
+  // so a full re-fetch of that store is the simplest way to react (mirrors
+  // how `cleared` above just re-runs conv.load() rather than reconciling
+  // piecemeal).
+  onMergedNodesChanged?: () => void,
 ) {
   const supabase = useSupabaseClient()
   const user = useSupabaseUser()
@@ -133,6 +139,26 @@ export function useRealtime(
       // filters others' private rows anyway), so reconcile from the server:
       // load() drops everything the DB no longer returns.
       .on('broadcast', { event: 'cleared' }, () => conv.load())
+      // A merged node (or its sources) created/deleted elsewhere — both rows
+      // insert in the same request (server/api/merge/create.post.ts) but as
+      // two separate writes, so either event refreshing the whole store is
+      // simpler and safer than trying to patch the merged_context_nodes row
+      // in before its sources have necessarily landed yet.
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'merged_context_nodes', filter: `conversation_id=eq.${conversationId}` },
+        () => onMergedNodesChanged?.(),
+      )
+      .on(
+        'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'merged_context_nodes' },
+        () => onMergedNodesChanged?.(),
+      )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'merged_context_sources' },
+        () => onMergedNodesChanged?.(),
+      )
       // Live "who's chatting where" — see PresenceMeta above. This has no RLS
       // of its own (same as retract/reveal above), so the *caller*
       // (usePresenceActivity) must never announce a segment that isn't

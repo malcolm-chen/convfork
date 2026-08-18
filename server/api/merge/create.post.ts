@@ -38,11 +38,22 @@ export default defineEventHandler(async (event) => {
     segments.map(async (s) => {
       const { data: headNode } = await admin
         .from('nodes')
-        .select('id, conversation_id, author_id')
+        .select('id, conversation_id, author_id, visibility')
         .eq('id', s.headNodeId)
         .single()
       if (!headNode || headNode.conversation_id !== body.conversationId) {
         throw createError({ statusCode: 400, statusMessage: 'invalid conversation node' })
+      }
+      // segment_head_node_id is later resolved by every team member's own
+      // client (see ReasoningTree.vue), not just the merge's creator — a
+      // private head (reachable via selective per-turn sharing) is loaded
+      // by nobody but its author, so teammates could never find it. The
+      // client is expected to send the segment's first *shared* node instead
+      // (composables/useSegments.ts's firstSharedNodeId); reject anything
+      // else rather than silently persisting a reference only its author can
+      // ever resolve.
+      if (headNode.visibility !== 'shared') {
+        throw createError({ statusCode: 400, statusMessage: 'segment head must be shared' })
       }
       const snapshot = await fetchSegmentSnapshot(admin, s.headNodeId, s.tipNodeId)
       if (!snapshot.length) {

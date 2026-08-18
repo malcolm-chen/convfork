@@ -102,6 +102,23 @@ export function sharedSegments<T extends SegmentNodeLike & { visibility: string 
 }
 
 /**
+ * A segment's *stable, cross-user* identity for anything persisted server-side
+ * and later resolved by teammates — e.g. a merge source reference
+ * (server/api/merge/create.post.ts). `segment.id` (the chain's true head) is
+ * wrong for this: with selective per-turn sharing, a segment can start with
+ * private turns its author never shared, which teammates' clients never load
+ * at all (RLS) — so a reference to that head id resolves for the author but
+ * silently fails to match anything on a teammate's canvas. The first SHARED
+ * node in the chain is visible to the whole team by definition, so it's the
+ * only id in the segment that everyone can resolve the same way.
+ */
+export function firstSharedNodeId<T extends SegmentNodeLike & { visibility: string }>(
+  segment: Segment<T>,
+): string {
+  return segment.nodes.find((n) => n.visibility === 'shared')?.id ?? segment.id
+}
+
+/**
  * Sequential "C" numbering for the canvas badges (C1, C2, …) and the
  * "Forked from C1-2" breadcrumb — ordered by when each segment was *first
  * shared*, not when it was created. A segment with no shared node at all
