@@ -10,11 +10,11 @@ export interface PresenceMeta {
   updatedAt: number
 }
 
-// Subscribes to nodes (INSERT+UPDATE) and reactions (INSERT+DELETE) for a
-// conversation. All updates are idempotent upserts-by-id (§8.3). A visibility
-// UPDATE that newly reveals a node triggers a lineage delta-fetch, because we
-// never received the INSERTs for a teammate's previously-private branch
-// (RLS-over-realtime).
+// Subscribes to nodes (INSERT+UPDATE+DELETE) and reactions (INSERT+DELETE)
+// for a conversation. All updates are idempotent upserts-by-id (§8.3). A
+// visibility UPDATE that newly reveals a node triggers a lineage delta-fetch,
+// because we never received the INSERTs for a teammate's previously-private
+// branch (RLS-over-realtime).
 export function useRealtime(
   conversationId: string,
   conv: ReturnType<typeof useConversation>,
@@ -81,6 +81,20 @@ export function useRealtime(
           }
         },
       )
+      // A node was purged outright (merge deletion's cascade, an edit's
+      // discarded branch, etc.) rather than flipped private — those flows
+      // never broadcast, so without this, only the requester's own
+      // post-action conv.load() would notice; everyone else's tree would
+      // keep showing nodes the server already dropped. nodes has replica
+      // identity full (0004), so RLS can still evaluate against the old row.
+      .on(
+        'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'nodes', filter: `conversation_id=eq.${conversationId}` },
+        (p) => {
+          const old = p.old as Partial<TreeNode>
+          if (old?.id) conv.removeNodes([old.id])
+        },
+      )
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'reactions' },
@@ -134,10 +148,12 @@ export function useRealtime(
         if (!ids.length) return
         Promise.all(ids.map((id) => conv.fetchLineage(id))).then(() => conv.loadReactions())
       })
-      // A member cleared the whole tree server-side. DELETEs don't reach us
-      // over postgres_changes (only INSERT/UPDATE are subscribed, and RLS
-      // filters others' private rows anyway), so reconcile from the server:
-      // load() drops everything the DB no longer returns.
+      // A member cleared the whole tree server-side. The per-row DELETE
+      // handler above would eventually catch up node-by-node, but a full
+      // wipe is exactly the case where a single reconcile-from-server is
+      // simpler and safer than trusting every individual DELETE event to
+      // arrive (e.g. across a brief disconnect): load() drops everything
+      // the DB no longer returns.
       .on('broadcast', { event: 'cleared' }, () => conv.load())
       // A merged node (or its sources) created/deleted elsewhere — both rows
       // insert in the same request (server/api/merge/create.post.ts) but as
