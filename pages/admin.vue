@@ -125,6 +125,33 @@ async function removeUser(u: StudyUser) {
   }
 }
 
+async function deleteSession(sid: string, group: { teamId: string | null; users: StudyUser[] }) {
+  if (!group.teamId) return
+  const count = group.users.length
+  if (
+    !confirm(
+      `Delete session "${sid}" and ALL its data — ${count} user${count === 1 ? '' : 's'}, ` +
+        `their conversations, messages, and reactions? This cannot be undone. ` +
+        `The Session ID becomes free again immediately, so you can recreate it with a different condition.`,
+    )
+  ) {
+    return
+  }
+  error.value = ''
+  busy.value = true
+  try {
+    await $fetch('/api/admin/sessions', {
+      method: 'DELETE',
+      body: { teamId: group.teamId },
+    })
+    await refreshList()
+  } catch (err: any) {
+    error.value = err?.data?.statusMessage || err?.message || 'Delete session failed'
+  } finally {
+    busy.value = false
+  }
+}
+
 async function logout() {
   await $fetch('/api/admin/logout', { method: 'POST' })
   await navigateTo('/login')
@@ -132,12 +159,13 @@ async function logout() {
 
 /** Group users by session for the table section headers */
 const bySession = computed(() => {
-  const map = new Map<string, { condition: SharingCondition | null; users: StudyUser[] }>()
+  const map = new Map<string, { teamId: string | null; condition: SharingCondition | null; users: StudyUser[] }>()
   for (const u of list.value?.users ?? []) {
     const key = u.sessionId || '(no session)'
-    const entry = map.get(key) ?? { condition: u.sharingCondition, users: [] }
+    const entry = map.get(key) ?? { teamId: u.teamId, condition: u.sharingCondition, users: [] }
     entry.users.push(u)
     if (!entry.condition && u.sharingCondition) entry.condition = u.sharingCondition
+    if (!entry.teamId && u.teamId) entry.teamId = u.teamId
     map.set(key, entry)
   }
   return [...map.entries()].sort(([a], [b]) => a.localeCompare(b))
@@ -204,6 +232,17 @@ const bySession = computed(() => {
               Session <code>{{ sid }}</code>
               <UiBadge class="badge">{{ conditionLabel(group.condition) }}</UiBadge>
               <span class="count">{{ group.users.length }} user{{ group.users.length === 1 ? '' : 's' }}</span>
+              <UiButton
+                v-if="group.teamId"
+                type="button"
+                variant="danger"
+                size="sm"
+                class="delete-session"
+                :disabled="busy"
+                @click="deleteSession(sid, group)"
+              >
+                Delete session
+              </UiButton>
             </h3>
             <table>
               <thead>
@@ -282,6 +321,7 @@ select:disabled { opacity: 0.7; background: var(--paper); }
 .session-block { margin-bottom: 22px; }
 .badge { margin-left: 8px; }
 .count { margin-left: 8px; color: var(--muted); font-weight: 400; }
+.delete-session { margin-left: 12px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); }
 th { color: var(--muted); font-weight: 600; background: var(--paper); }
