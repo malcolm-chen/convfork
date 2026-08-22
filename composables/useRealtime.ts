@@ -159,7 +159,11 @@ export function useRealtime(
       // insert in the same request (server/api/merge/create.post.ts) but as
       // two separate writes, so either event refreshing the whole store is
       // simpler and safer than trying to patch the merged_context_nodes row
-      // in before its sources have necessarily landed yet.
+      // in before its sources have necessarily landed yet. Kept as a
+      // best-effort second path alongside the explicit broadcasts below —
+      // RLS-over-realtime for merged_context_nodes DELETE turned out not to
+      // reliably reach teammates in practice even with replica identity full,
+      // so the broadcasts are the path actually relied on now.
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'merged_context_nodes', filter: `conversation_id=eq.${conversationId}` },
@@ -175,6 +179,15 @@ export function useRealtime(
         { event: 'INSERT', schema: 'public', table: 'merged_context_sources' },
         () => onMergedNodesChanged?.(),
       )
+      // Explicit fallbacks for the two merge-list mutations, sent by whoever
+      // performed the action (see broadcastMergeCreated/broadcastMergeDeleted
+      // below) — same rationale as retract/reveal/cleared above.
+      .on('broadcast', { event: 'merge-created' }, () => onMergedNodesChanged?.())
+      .on('broadcast', { event: 'merge-deleted' }, (p) => {
+        const ids = (p.payload?.purgedNodeIds ?? []) as string[]
+        if (ids.length) conv.removeNodes(ids)
+        onMergedNodesChanged?.()
+      })
       // Live "who's chatting where" — see PresenceMeta above. This has no RLS
       // of its own (same as retract/reveal above), so the *caller*
       // (usePresenceActivity) must never announce a segment that isn't
@@ -219,6 +232,18 @@ export function useRealtime(
     channel?.send({ type: 'broadcast', event: 'cleared', payload: {} })
   }
 
+  // Creator-side announcement of a new merged node (see MergeModal.vue).
+  function broadcastMergeCreated() {
+    channel?.send({ type: 'broadcast', event: 'merge-created', payload: {} })
+  }
+
+  // Author-side announcement that a merged node (and any forked segment it
+  // cascaded into erasing) was deleted — purgedNodeIds are the server's
+  // collectDescendantIds result (server/api/merge/delete.post.ts).
+  function broadcastMergeDeleted(purgedNodeIds: string[]) {
+    channel?.send({ type: 'broadcast', event: 'merge-deleted', payload: { purgedNodeIds } })
+  }
+
   // Publishes (or refreshes) this client's own "I'm on this segment" signal.
   // Updates the local map immediately (so the sender sees their own "You"
   // entry without waiting on a round trip — broadcasts aren't delivered back
@@ -257,6 +282,8 @@ export function useRealtime(
     broadcastRetract,
     broadcastReveal,
     broadcastCleared,
+    broadcastMergeCreated,
+    broadcastMergeDeleted,
     trackPresence,
     untrackPresence,
     presenceBySegment,

@@ -133,6 +133,7 @@ async function onMergeCreated() {
   showMergeModal.value = false
   mergeMode.cancel()
   await mergedNodesStore.refresh()
+  rt.broadcastMergeCreated() // tell teammates — see broadcastMergeDeleted for why
 }
 
 // ── Merge-fork draft: a chat seeded from a merged node's inherited context.
@@ -707,14 +708,20 @@ async function onDeleteMerge(mergedNodeId: string) {
   )
   if (!ok) return
   logger.log('merge_delete', { merged_node_id: mergedNodeId }, { conversationId })
+  let erasedNodeIds: string[] = []
   try {
-    await $fetch('/api/merge/delete', { method: 'POST', body: { mergedNodeId } })
+    const res = await $fetch<{ ok: boolean; erasedNodeIds: string[] }>('/api/merge/delete', {
+      method: 'POST',
+      body: { mergedNodeId },
+    })
+    erasedNodeIds = res.erasedNodeIds
   } catch (err: any) {
     alert(err?.data?.statusMessage || 'Could not delete the merged node — please retry.')
     return
   }
   await mergedNodesStore.refresh()
   await conv.load() // pick up any forked segments the delete erased
+  rt.broadcastMergeDeleted(erasedNodeIds) // tell teammates — postgres_changes DELETEs aren't reliable here
 }
 
 async function onReact(payload: { nodeId: string; type: string }) {

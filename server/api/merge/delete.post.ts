@@ -34,16 +34,20 @@ export default defineEventHandler(async (event) => {
   if (rootsErr) throw createError({ statusCode: 500, statusMessage: `list forks: ${rootsErr.message}` })
 
   const rootIds = (forkedRoots ?? []).map((n) => n.id)
-  let erasedNodeCount = 0
+  let erasedNodeIds: string[] = []
   if (rootIds.length) {
-    const idsToDelete = await collectDescendantIds(admin, mergedNode.conversation_id, rootIds)
-    await purgeNodesByIds(admin, idsToDelete)
-    erasedNodeCount = idsToDelete.length
+    erasedNodeIds = await collectDescendantIds(admin, mergedNode.conversation_id, rootIds)
+    await purgeNodesByIds(admin, erasedNodeIds)
   }
 
   // merged_context_sources cascades via its own FK (on delete cascade).
   const { error: delErr } = await admin.from('merged_context_nodes').delete().eq('id', body.mergedNodeId)
   if (delErr) throw createError({ statusCode: 500, statusMessage: `delete merged node: ${delErr.message}` })
 
-  return { ok: true, erasedNodeCount }
+  // erasedNodeIds travels back so the client can broadcast them — a plain
+  // nodes DELETE isn't reliably delivered to teammates over postgres_changes
+  // (RLS-over-realtime for DELETE is unreliable in practice, same root cause
+  // as the retract/reveal broadcasts in useRealtime.ts), so this cascade
+  // purge needs the same explicit-broadcast treatment.
+  return { ok: true, erasedNodeIds }
 })
