@@ -15,8 +15,18 @@ For the given session ID this script:
      row already has ts / action_type / action_content / conversation_id /
      node_id, see composables/useActionLogger.ts), grouping rows by the
      participant they belong to.
-  4. Writes one JSON array per participant plus a metadata.json, and zips
-     the result.
+  4. Pulls the full conversation trees (`conversations` + `nodes`) for the
+     team from Supabase — this is where actual message content lives,
+     including AI responses (server/api/chat.post.ts persists assistant
+     nodes with role='assistant' here; the S3 action log only records a
+     token count for `receive_response`, never the response text). Assistant
+     nodes are authored under the human who triggered generation
+     (author_id = the initiating user, see chat.post.ts), so grouping by
+     author_id attributes both a participant's own turns and the AI replies
+     they triggered to that participant.
+  5. Writes one action-log JSON array per participant, one messages JSON
+     array per participant (their nodes, full conversation content), plus a
+     metadata.json, and zips the result.
 
     uv run python scripts/export_session.py <SESSION_ID> [--out DIR]
 
@@ -98,6 +108,44 @@ def fetch_participants(sb: Client, team_id: str) -> list[dict]:
     return res.data or []
 
 
+def fetch_conversations(sb: Client, team_id: str) -> list[dict]:
+    res = (
+        sb.table("conversations")
+        .select("id, title, created_by, created_at")
+        .eq("team_id", team_id)
+        .execute()
+    )
+    return res.data or []
+
+
+def fetch_nodes(sb: Client, conversation_ids: list[str]) -> list[dict]:
+    """Full message tree (user + assistant turns) for the given conversations,
+    paginated since the Supabase client caps a single response at 1000 rows."""
+    if not conversation_ids:
+        return []
+    nodes: list[dict] = []
+    page_size = 1000
+    start = 0
+    while True:
+        res = (
+            sb.table("nodes")
+            .select(
+                "id, conversation_id, parent_id, author_id, role, content, "
+                "reasoning, model, visibility, created_at"
+            )
+            .in_("conversation_id", conversation_ids)
+            .order("created_at")
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+        page = res.data or []
+        nodes.extend(page)
+        if len(page) < page_size:
+            break
+        start += page_size
+    return nodes
+
+
 def fetch_logs(s3, bucket: str, team_id: str) -> dict[str, list[dict]]:
     """Returns {user_id: [action_row, ...]} pulled from every NDJSON object
     under logs/{team_id}/ (all participants, all browser sub-sessions)."""
@@ -141,10 +189,19 @@ def build_export(session_id: str, out_dir: Path) -> Path:
     print(f"Listing logs under s3://{bucket}/logs/{team_id}/ ...")
     rows_by_user = fetch_logs(s3, bucket, team_id)
 
+    print("Fetching conversation trees (nodes, incl. assistant responses)...")
+    conversations = fetch_conversations(sb, team_id)
+    nodes = fetch_nodes(sb, [c["id"] for c in conversations])
+    print(f"Conversations: {len(conversations)}, message nodes: {len(nodes)}")
+
+    nodes_by_user: dict[str, list[dict]] = {}
+    for node in nodes:
+        nodes_by_user.setdefault(node["author_id"], []).append(node)
+
     known_ids = {p["id"] for p in participants}
-    unknown_ids = sorted(set(rows_by_user) - known_ids)
+    unknown_ids = sorted((set(rows_by_user) | set(nodes_by_user)) - known_ids)
     if unknown_ids:
-        print(f"  ! {len(unknown_ids)} user_id(s) in S3 have no matching users row: {unknown_ids}", file=sys.stderr)
+        print(f"  ! {len(unknown_ids)} user_id(s) have no matching users row: {unknown_ids}", file=sys.stderr)
 
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     with tempfile.TemporaryDirectory() as tmp:
@@ -162,8 +219,18 @@ def build_export(session_id: str, out_dir: Path) -> Path:
             used_names.add(name)
             actions = sorted(rows_by_user.get(user_id, []), key=lambda r: r.get("ts", ""))
             (tmp_path / f"{name}.json").write_text(json.dumps(actions, indent=2, ensure_ascii=False))
+
+            messages = sorted(nodes_by_user.get(user_id, []), key=lambda r: r.get("created_at", ""))
+            (tmp_path / f"{name}_messages.json").write_text(json.dumps(messages, indent=2, ensure_ascii=False))
+
             file_index.append(
-                {"user_id": user_id, "file": f"{name}.json", "action_count": len(actions)}
+                {
+                    "user_id": user_id,
+                    "file": f"{name}.json",
+                    "action_count": len(actions),
+                    "messages_file": f"{name}_messages.json",
+                    "message_count": len(messages),
+                }
             )
 
         for p in participants:
@@ -188,9 +255,18 @@ def build_export(session_id: str, out_dir: Path) -> Path:
                 }
                 for p in participants
             ],
+            "conversations": [
+                {"id": c["id"], "title": c.get("title"), "created_by": c.get("created_by")}
+                for c in conversations
+            ],
             "files": file_index,
             "total_actions": sum(f["action_count"] for f in file_index),
-            "source": {"s3_bucket": bucket, "s3_prefix": f"logs/{team_id}/"},
+            "total_messages": sum(f["message_count"] for f in file_index),
+            "source": {
+                "s3_bucket": bucket,
+                "s3_prefix": f"logs/{team_id}/",
+                "supabase_tables": ["conversations", "nodes"],
+            },
             "exported_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
         (tmp_path / "metadata.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
