@@ -24,9 +24,21 @@ For the given session ID this script:
      (author_id = the initiating user, see chat.post.ts), so grouping by
      author_id attributes both a participant's own turns and the AI replies
      they triggered to that participant.
-  5. Writes one action-log JSON array per participant, one messages JSON
-     array per participant (their nodes, full conversation content), plus a
-     metadata.json, and zips the result.
+  5. Pulls merged-context nodes ("Merge Conversations" feature,
+     merged_context_nodes/merged_context_sources — see
+     supabase/migrations/0020_fix_merge_context_unit.sql) created within
+     those conversations, each with its source segments nested under it.
+     The S3 action log only records merge_fork/merge_delete events, never
+     the merge's own creation (title/summary/sources) — so each merge is
+     backfilled as a synthetic `merge_create` row (session_id
+     "backfill:merged_context_nodes") into its creator's action log,
+     alongside their real logged actions. Merges later hard-deleted
+     (server/api/merge/delete.post.ts) no longer exist in Postgres and
+     cannot be recovered.
+  6. Writes one action-log JSON array per participant (their real S3 rows
+     plus backfilled merge_create rows, sorted by ts), one messages JSON
+     array (their nodes, full conversation content incl. AI responses), plus
+     a metadata.json, and zips the result.
 
     uv run python scripts/export_session.py <SESSION_ID> [--out DIR]
 
@@ -146,6 +158,50 @@ def fetch_nodes(sb: Client, conversation_ids: list[str]) -> list[dict]:
     return nodes
 
 
+def fetch_merges(sb: Client, conversation_ids: list[str]) -> list[dict]:
+    """Merged-context nodes (design doc's "Merge Conversations" feature,
+    supabase/migrations/0020_fix_merge_context_unit.sql) created within the
+    given conversations, each with its source segments nested under it.
+    Hard-deleted merges (server/api/merge/delete.post.ts does a real DELETE,
+    cascading to merged_context_sources) are gone from Postgres entirely and
+    can't be recovered here — only merges that still exist can be exported."""
+    if not conversation_ids:
+        return []
+    merges_res = (
+        sb.table("merged_context_nodes")
+        .select("id, conversation_id, title, summary, created_by, created_at")
+        .in_("conversation_id", conversation_ids)
+        .order("created_at")
+        .execute()
+    )
+    merges = merges_res.data or []
+    if not merges:
+        return merges
+
+    merge_ids = [m["id"] for m in merges]
+    sources_by_merge: dict[str, list[dict]] = {}
+    page_size = 1000
+    start = 0
+    while True:
+        res = (
+            sb.table("merged_context_sources")
+            .select("merged_node_id, segment_head_node_id, author_id, included_through_turn_id, created_at")
+            .in_("merged_node_id", merge_ids)
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+        page = res.data or []
+        for row in page:
+            sources_by_merge.setdefault(row["merged_node_id"], []).append(row)
+        if len(page) < page_size:
+            break
+        start += page_size
+
+    for m in merges:
+        m["sources"] = sources_by_merge.get(m["id"], [])
+    return merges
+
+
 def fetch_logs(s3, bucket: str, team_id: str) -> dict[str, list[dict]]:
     """Returns {user_id: [action_row, ...]} pulled from every NDJSON object
     under logs/{team_id}/ (all participants, all browser sub-sessions)."""
@@ -194,9 +250,35 @@ def build_export(session_id: str, out_dir: Path) -> Path:
     nodes = fetch_nodes(sb, [c["id"] for c in conversations])
     print(f"Conversations: {len(conversations)}, message nodes: {len(nodes)}")
 
+    print("Fetching merged-context nodes (merge creations)...")
+    merges = fetch_merges(sb, [c["id"] for c in conversations])
+    print(f"Merges: {len(merges)}")
+
     nodes_by_user: dict[str, list[dict]] = {}
     for node in nodes:
         nodes_by_user.setdefault(node["author_id"], []).append(node)
+
+    # The S3 action log never captured merge *creation* (only merge_fork /
+    # merge_delete, logged client-side after the fact) — backfill it here as
+    # a synthetic row in the same shape useActionLogger.ts rows use, so it
+    # lands in the regular per-participant action log rather than a bolt-on
+    # file.
+    for merge in merges:
+        rows_by_user.setdefault(merge["created_by"], []).append(
+            {
+                "id": merge["id"],
+                "ts": merge["created_at"],
+                "session_id": "backfill:merged_context_nodes",
+                "action_type": "merge_create",
+                "action_content": {
+                    "title": merge["title"],
+                    "summary": merge["summary"],
+                    "sources": merge["sources"],
+                },
+                "conversation_id": merge["conversation_id"],
+                "node_id": merge["id"],
+            }
+        )
 
     known_ids = {p["id"] for p in participants}
     unknown_ids = sorted((set(rows_by_user) | set(nodes_by_user)) - known_ids)
@@ -262,10 +344,18 @@ def build_export(session_id: str, out_dir: Path) -> Path:
             "files": file_index,
             "total_actions": sum(f["action_count"] for f in file_index),
             "total_messages": sum(f["message_count"] for f in file_index),
+            "total_merges": len(merges),
             "source": {
                 "s3_bucket": bucket,
                 "s3_prefix": f"logs/{team_id}/",
-                "supabase_tables": ["conversations", "nodes"],
+                "supabase_tables": ["conversations", "nodes", "merged_context_nodes", "merged_context_sources"],
+                "note": (
+                    "merge_create rows are backfilled from merged_context_nodes/"
+                    "merged_context_sources (session_id='backfill:merged_context_nodes'), "
+                    "since the S3 action log never captured merge creation. Merges "
+                    "later hard-deleted (server/api/merge/delete.post.ts) are gone "
+                    "from Postgres and cannot be recovered."
+                ),
             },
             "exported_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
